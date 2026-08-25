@@ -1,0 +1,3 @@
+# dist/ is committed on purpose (the service serves it at /ui — same pattern as
+# the gateway console repo); only dependencies stay out.
+node_modules/

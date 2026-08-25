@@ -1,0 +1,11 @@
+# Retrieval goldset — author queries over YOUR ingested corpus, then:
+#   python evals/run_eval.py
+# Each query needs programmatic gold criteria (no LLM judge): a parent-document
+# URI fragment and/or a content regex that marks a passage as correct.
+queries:
+  - id: example-build-system
+    q: what build system does repo-x use
+    workspace: repo-x            # optional: focus ranking on a workspace facet
+    gold:
+      uri_contains: repo-x/README
+      content_regex: "(gradle|maven)"

@@ -1,0 +1,89 @@
+# Local production-like stack: Postgres (pgvector) + memory-graph API/worker + MCP sidecar.
+# This is the v3 local-first deployment target: everything the memory system needs on a laptop.
+#
+#   docker compose up --build          # start the stack
+#   ./scripts/smoke_local.sh           # end-to-end smoke: ingest → fold → search → as-of → purge
+services:
+  postgres:
+    image: pgvector/pgvector:pg18       # same major as CI (deploy-memory-graph.yml)
+    environment:
+      POSTGRES_DB: mlpal
+      POSTGRES_USER: postgres
+      # Local/dev only — NEVER put a real secret here. Override via the POSTGRES_PASSWORD env var.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-localdev}
+    ports:
+      - "5432:5432"
+    volumes:
+      # pg18 image convention: mount the parent dir (data lands in a versioned subdir,
+      # enabling pg_upgrade --link across majors). See docker-library/postgres#37.
+      - memgraph-pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d mlpal"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  memory-graph:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      MLPAL_ENVIRONMENT: local
+      MLPAL_DEBUG: "true"
+      MLPAL_DB_HOST: postgres
+      MLPAL_DB_PORT: "5432"
+      MLPAL_DB_NAME: mlpal
+      MLPAL_DB_USER: postgres
+      MLPAL_DB_PASSWORD: ${POSTGRES_PASSWORD:-localdev}
+      MLPAL_DB_SCHEMA: memory
+      MLPAL_GRAPH_DRIVER: postgres
+      MLPAL_DEV_AUTH: "true"
+      MLPAL_UPDATER_ENABLED: "true"
+      # real semantic embeddings in-process (bge-small ONNX) — no gateway key needed.
+      # Override to `gateway` (+ export MLPAL_EMBEDDINGS_API_KEY) for production embeddings.
+      MLPAL_EMBEDDINGS_PROVIDER: ${MLPAL_EMBEDDINGS_PROVIDER:-local}
+      MLPAL_EMBEDDINGS_API_KEY: ${MLPAL_EMBEDDINGS_API_KEY:-}
+      FASTEMBED_CACHE_PATH: /var/cache/fastembed
+      # appuser has no home dir; HF's downloader needs a writable cache root
+      HF_HOME: /var/cache/fastembed/hf
+    volumes:
+      - fastembed-cache:/var/cache/fastembed
+      # Built memory UI (ui-app: `npm run build`). The image bakes only the legacy ui/;
+      # this mount lets main.py pick up the Vite app without touching the Dockerfile.
+      - ./ui-app/dist:/app/ui-app/dist:ro
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import httpx; httpx.get('http://localhost:8000/health').raise_for_status()\""]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  # Read-only agent surface (same image, MCP entrypoint) — how yodex/Claude Code connect.
+  memory-mcp:
+    build: .
+    command: ["python", "-m", "mlpal_memory_graph.mcp_server"]
+    # the image's HEALTHCHECK probes the API port (8000); this container serves 8011
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import httpx; httpx.get('http://localhost:8011/health').raise_for_status()\""]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    depends_on:
+      memory-graph:
+        condition: service_healthy
+    environment:
+      MLPAL_MEMORY_SERVICE_URL: "http://memory-graph:8000"
+      FASTMCP_STATELESS: "true"
+      # local-first identity: MCP clients that can't attach headers (Claude Code, yodex)
+      # read as this dev identity. Env-gated — absent in prod, where reads fail closed.
+      MLPAL_DEV_AUTH: "true"
+      MLPAL_DEMO_ORG_ID: "local"
+      MLPAL_DEMO_USER_ID: "${USER:-demo}"
+    ports:
+      - "8011:8011"
+
+volumes:
+  memgraph-pgdata:
+  fastembed-cache:

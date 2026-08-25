@@ -1,0 +1,144 @@
+"""FastAPI application factory (mirrors the platform create_app() convention)."""
+
+from __future__ import annotations
+
+import asyncio
+from contextlib import asynccontextmanager
+from pathlib import Path
+
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+
+from . import __version__
+from .api.v1 import documents, episodes, governance, memory, ontology, ops
+from .core.config import get_settings
+from .core.logging import get_logger, setup_logging
+from .db import get_engine
+from .db.models import Base
+
+log = get_logger(__name__)
+
+
+def _run_alembic_upgrade() -> None:
+    """Best-effort `alembic upgrade head` (locate alembic.ini up the tree)."""
+    from alembic.config import Config
+
+    from alembic import command
+
+    for parent in Path(__file__).resolve().parents:
+        ini = parent / "alembic.ini"
+        if ini.exists():
+            cfg = Config(str(ini))
+            cfg.set_main_option("sqlalchemy.url", get_settings().database_url_sync)
+            command.upgrade(cfg, "head")
+            return
+
+
+async def _init_db() -> None:
+    settings = get_settings()
+    if settings.is_postgres:
+        # migrate on boot, in-process — same pattern as storage/skills/mcp services.
+        try:
+            await asyncio.to_thread(_run_alembic_upgrade)
+            log.info("db.migrated")
+        except Exception as exc:  # noqa: BLE001
+            log.error("db.migrate_failed", error=str(exc))
+    else:
+        # local sqlite/dev: create tables directly
+        async with get_engine().begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        log.info("db.created_all")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    settings = get_settings()
+    await _init_db()
+    worker = None
+    if settings.updater_enabled:
+        from .services.worker import MemoryUpdateWorker
+
+        worker = MemoryUpdateWorker()
+        await worker.start()
+    try:
+        yield
+    finally:
+        if worker is not None:
+            await worker.stop()
+
+
+def create_app() -> FastAPI:
+    settings = get_settings()
+    setup_logging(settings.log_level)
+
+    # Fail-fast guard: refuse to build an app that would serve with dev auth, default
+    # keys, or a missing auth SDK outside local/test. Crashing at startup is visible
+    # (CrashLoopBackOff + log line); failing open is not.
+    from .api.deps import _HAS_MLPAL_AUTH
+
+    config_errors = settings.production_config_errors(has_auth_sdk=_HAS_MLPAL_AUTH)
+    if config_errors:
+        for err in config_errors:
+            log.error("config.fatal", error=err, environment=settings.environment)
+        raise RuntimeError(f"unsafe production configuration: {'; '.join(config_errors)}")
+
+    app = FastAPI(
+        title="mlpal-memory-graph",
+        description="Institutional memory graph for enterprises using MLPal.",
+        version=__version__,
+        lifespan=lifespan,
+    )
+    # Bearer/header auth only — no cookies, so credentials mode stays off (wildcard
+    # origins + credentials is an invalid CORS combination anyway).
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=False,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    @app.exception_handler(Exception)
+    async def _unhandled(request: Request, exc: Exception) -> JSONResponse:  # noqa: ARG001
+        log.error("unhandled_error", error=str(exc), exc_info=exc)
+        return JSONResponse(status_code=500, content={"detail": "internal server error"})
+
+    @app.get("/health", tags=["meta"])
+    async def health() -> dict:
+        return {"status": "ok", "service": "mlpal-memory-graph", "version": __version__}
+
+    app.include_router(episodes.router, prefix="/api/v1")
+    app.include_router(memory.router, prefix="/api/v1")
+    app.include_router(documents.router, prefix="/api/v1")
+    app.include_router(governance.router, prefix="/api/v1")
+    app.include_router(ontology.router, prefix="/api/v1")
+    app.include_router(ops.router, prefix="/api/v1")
+
+    # Memory explorer UI (static, read-only; ships with the service). /ui → index.html.
+    # Prefer the built Vite app (ui-app/dist); fall back to the legacy static ui/ so
+    # nothing breaks before the first `npm run build`.
+    ui_dir = next(
+        (
+            d
+            for p in Path(__file__).resolve().parents
+            for d in (p / "ui-app" / "dist", p / "ui")
+            if (d / "index.html").exists()
+        ),
+        None,
+    )
+    if ui_dir is not None:
+        from fastapi.staticfiles import StaticFiles
+
+        app.mount("/ui", StaticFiles(directory=str(ui_dir), html=True), name="ui")
+    return app
+
+
+app = create_app()
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    s = get_settings()
+    uvicorn.run("mlpal_memory_graph.main:app", host=s.host, port=s.port, reload=s.debug)
