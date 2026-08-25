@@ -26,7 +26,7 @@ from ..db.models.node import Node
 from ..services.embeddings_client import get_embedder
 
 
-async def _reembed(batch: int, dry_run: bool) -> int:
+async def _reembed(batch: int, dry_run: bool, max_rows: int | None = None) -> int:
     embedder = get_embedder()
     factory = get_session_factory()
     total = 0
@@ -68,6 +68,11 @@ async def _reembed(batch: int, dry_run: bool) -> int:
             done += len(rows)
             total += len(rows)
             print(f"  {model.__tablename__}: {done}/{count}", flush=True)
+            if max_rows is not None and total >= max_rows:
+                # bounded run: exit so a driver loop can restart a fresh process
+                # (long-lived ONNX sessions degrade; the migration is idempotent)
+                print(f"max-rows reached ({total}); exiting for restart", flush=True)
+                return total
     return total
 
 
@@ -75,8 +80,9 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--batch", type=int, default=64)
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--max-rows", type=int, default=None)
     args = ap.parse_args()
-    total = asyncio.run(_reembed(args.batch, args.dry_run))
+    total = asyncio.run(_reembed(args.batch, args.dry_run, args.max_rows))
     print(f"re-embedded {total} rows")
     return 0
 
