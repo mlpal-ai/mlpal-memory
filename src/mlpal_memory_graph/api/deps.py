@@ -20,7 +20,7 @@ from ..db import get_session
 from ..pipeline.updater import Updater
 from ..services.retrieval import Retrieval
 
-ADMIN_PERMISSION = "memory:admin"
+ADMIN_PERMISSION = "memory.admin"
 
 try:  # the SDK is an optional extra; absent in local dev/test
     import mlpal_auth  # noqa: F401
@@ -52,6 +52,7 @@ class AuthIdentity:
 async def get_identity(
     request: Request,
     authorization: str | None = Header(None),
+    x_api_key: str | None = Header(None, alias="X-API-Key"),
     x_internal_service_key: str | None = Header(None, alias="X-Internal-Service-Key"),
     x_test_user_id: str | None = Header(None),
     x_test_org_id: str | None = Header(None),
@@ -74,10 +75,11 @@ async def get_identity(
         )
     if not _HAS_MLPAL_AUTH:
         raise HTTPException(status_code=503, detail="auth backend unavailable")
-    # 3) production: validate via mlpal-auth (JWT or mlpal_sk_ key, 60s SDK cache)
-    if not authorization:
+    # 3) production: validate via mlpal-auth (JWT or mlpal_sk_ key, 60s SDK cache).
+    # X-API-Key is the platform-UI convention for API keys; Bearer carries either.
+    if not authorization and not x_api_key:
         raise HTTPException(status_code=401, detail="missing credentials")
-    token = authorization.removeprefix("Bearer ").strip()
+    token = x_api_key or (authorization or "").removeprefix("Bearer ").strip()
     try:
         from mlpal_auth import AuthClient  # type: ignore
 

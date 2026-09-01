@@ -35,7 +35,7 @@ router = APIRouter(prefix="/documents", tags=["documents"])
 async def ingest_document(
     body: DocumentIngestRequest,
     session: Annotated[AsyncSession, Depends(get_session)],
-    identity: Annotated[AuthIdentity, Depends(require_permission("memory:write"))],
+    identity: Annotated[AuthIdentity, Depends(require_permission("memory.write"))],
 ) -> DocumentIngestResponse:
     # Same hard gate as episodes: non-privileged callers write only their own USER scope
     # or ORG; subject scopes (team/repo/service/agent) require service key or org admin.
@@ -81,6 +81,60 @@ async def ingest_document(
     )
 
 
+@router.delete("/{document_id}")
+async def forget_document(
+    document_id: str,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    identity: Annotated[AuthIdentity, Depends(require_permission("memory.write"))],
+) -> dict:
+    """Forget one document: hard-delete it and its chunks (direct tier), audited.
+
+    Scope-authorized like any write (own personal scope, or org; subject scopes
+    need elevation). Derived facts are NOT auto-deleted (refcounted purge is a
+    separate mechanism); what users experience as "memory pollution" is the
+    direct tier, and this removes it — with an audit episode, never silently.
+    """
+    from sqlalchemy import delete as _delete
+    from sqlalchemy import select as _select
+
+    from ...ingest.envelope import Actor, EpisodeEnvelope
+    from ...repositories.episodes import insert_episode
+
+    doc = (
+        await session.execute(
+            _select(Document).where(
+                Document.id == document_id,
+                browse_clause(
+                    Document,
+                    tenant_id=identity.org_id,
+                    user_id=identity.user_id,
+                    team_ids=tuple(identity.team_ids),
+                ),
+            )
+        )
+    ).scalar_one_or_none()
+    if doc is None:
+        raise HTTPException(status_code=404, detail="document not found")
+    authorize_write_scope(identity, doc.scope, doc.scope_id)
+
+    purged = await session.execute(_delete(Chunk).where(Chunk.document_id == doc.id))
+    await session.execute(_delete(Document).where(Document.id == doc.id))
+    # audit: forgetting is a governance event with a durable, content-free record
+    env = EpisodeEnvelope(
+        org_id=identity.org_id,
+        scope=doc.scope,
+        scope_id=doc.scope_id,
+        workspace=doc.workspace,
+        actor=Actor(user_id=identity.user_id),
+        source="governance",
+        action_type="memory.forgotten",
+        payload={"document_id": doc.id, "title": doc.title or "",
+                 "purged_chunks": purged.rowcount or 0},
+    )
+    await insert_episode(session, env.to_episode_kwargs(capture_content=False))
+    return {"id": doc.id, "purged_chunks": purged.rowcount or 0, "title": doc.title}
+
+
 def _doc_out(doc: Document, chunk_count: int = 0) -> DocumentOut:
     return DocumentOut(
         id=doc.id,
@@ -100,13 +154,18 @@ def _doc_out(doc: Document, chunk_count: int = 0) -> DocumentOut:
 @router.get("", response_model=DocumentListResponse)
 async def list_documents(
     session: Annotated[AsyncSession, Depends(get_session)],
-    identity: Annotated[AuthIdentity, Depends(require_permission("memory:read"))],
+    identity: Annotated[AuthIdentity, Depends(require_permission("memory.read"))],
     q: str | None = Query(None, description="title substring filter"),
     source: str | None = Query(None),
     workspace: str | None = Query(None),
     scope: str | None = Query(None),
     limit: int = Query(25, ge=1, le=100),
     offset: int = Query(0, ge=0),
+    order: str = Query(
+        "ingested", pattern="^(ingested|valid)$",
+        description="ingested (newest first, default) | valid (event-time ascending — "
+        "the timeline view's order, so a page spans history instead of yesterday)",
+    ),
 ) -> DocumentListResponse:
     """Browse the direct store (UI listing). Same visibility as retrieval: org-internal
     rows plus the caller's own personal scope; other users' personal docs never appear."""
@@ -137,7 +196,11 @@ async def list_documents(
             await session.execute(
                 select(Document)
                 .where(*where)
-                .order_by(Document.ingested_at.desc())
+                .order_by(
+                    Document.valid_at.asc().nulls_last()
+                    if order == "valid"
+                    else Document.ingested_at.desc()
+                )
                 .limit(limit)
                 .offset(offset)
             )
@@ -165,7 +228,7 @@ async def list_documents(
 async def get_document(
     document_id: str,
     session: Annotated[AsyncSession, Depends(get_session)],
-    identity: Annotated[AuthIdentity, Depends(require_permission("memory:read"))],
+    identity: Annotated[AuthIdentity, Depends(require_permission("memory.read"))],
 ) -> DocumentDetailResponse:
     doc = (
         await session.execute(

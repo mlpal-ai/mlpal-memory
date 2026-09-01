@@ -16,13 +16,14 @@ import {
 } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { fmtDate, fmtScore } from "@/lib/format";
+import { useWorkspace } from "@/lib/workspace";
 
 const SCOPES = ["", "user", "team", "org", "repo", "service", "agent"] as const;
 const ORIGINS = ["", "direct", "derived"] as const;
 
 export function Search() {
   const [q, setQ] = useState("");
-  const [workspace, setWorkspace] = useState("");
+  const [workspace, setWorkspace] = useWorkspace();
   const [scope, setScope] = useState<(typeof SCOPES)[number]>("");
   const [origin, setOrigin] = useState<(typeof ORIGINS)[number]>("");
   const [result, setResult] = useState<SearchResponse | null>(null);

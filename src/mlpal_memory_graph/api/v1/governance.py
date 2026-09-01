@@ -1,7 +1,7 @@
 """Consent (collect/update opt-out) + extraction-policy administration.
 
 Authorization (design-proposal §5, §6): a user may govern their *own* personal (USER) scope;
-governing org/team scope requires ``memory:admin``. Org/team consent composes via
+governing org/team scope requires ``memory.admin``. Org/team consent composes via
 deny-precedence at fold time, so an org OFF cannot be overridden by a narrower scope.
 """
 
@@ -48,7 +48,7 @@ def _pk(identity: AuthIdentity, scope: Scope, scope_id: str) -> tuple[str, str, 
 async def set_consent(
     body: ConsentRequest,
     session: Annotated[AsyncSession, Depends(get_session)],
-    identity: Annotated[AuthIdentity, Depends(require_permission("memory:write"))],
+    identity: Annotated[AuthIdentity, Depends(require_permission("memory.write"))],
 ) -> ConsentResponse:
     _authorize_scope_write(identity, body.scope, body.scope_id)
     org_id, scope, scope_id = _pk(identity, body.scope, body.scope_id)
@@ -102,7 +102,7 @@ async def set_consent(
 @router.get("/consent", response_model=ConsentResponse)
 async def get_consent(
     session: Annotated[AsyncSession, Depends(get_session)],
-    identity: Annotated[AuthIdentity, Depends(require_permission("memory:read"))],
+    identity: Annotated[AuthIdentity, Depends(require_permission("memory.read"))],
     scope: Scope = Query(...),
     scope_id: str = Query(...),
 ) -> ConsentResponse:
@@ -116,7 +116,7 @@ async def get_consent(
 async def set_policy(
     body: PolicyRequest,
     session: Annotated[AsyncSession, Depends(get_session)],
-    identity: Annotated[AuthIdentity, Depends(require_permission("memory:write"))],
+    identity: Annotated[AuthIdentity, Depends(require_permission("memory.write"))],
 ) -> PolicyResponse:
     _authorize_scope_write(identity, body.scope, body.scope_id)
     org_id, scope, scope_id = _pk(identity, body.scope, body.scope_id)

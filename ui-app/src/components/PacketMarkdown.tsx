@@ -6,6 +6,28 @@ const MEMORY_URI = /^memory:\/\/(node|chunk)\/([\w-]+)$/;
 
 export type CitationKind = "node" | "chunk";
 
+/** The packet joins its Evidence blocks with single newlines, so CommonMark
+ * merges every `> "quote"` / `> — [Source]` pair into ONE flowing blockquote.
+ * Re-shape before parsing: a blank line before each quote makes every passage
+ * its own blockquote; a bare `>` line before the attribution (and the
+ * failed-run warning) makes each its own paragraph — i.e. its own line. */
+function separateEvidence(markdown: string): string {
+  return markdown
+    .replace(/\n(> ")/g, "\n\n$1")
+    .replace(/\n> (— \[)/g, "\n>\n> $1")
+    .replace(/\n> (⚠)/g, "\n>\n> $1");
+}
+
+/** Model-composed answers (synthesized/hop) cite as bare `[memory://kind/id]`
+ * per the synthesis contract — turn those into markdown links so they render
+ * as the same clickable citation badges the packet's titled links do. */
+function linkifyBareCitations(markdown: string): string {
+  return markdown.replace(
+    /\[(memory:\/\/(node|chunk)\/([\w-]+))\](?!\()/g,
+    (_m, uri: string, kind: string, id: string) => `[${kind} ${id.slice(0, 8)}](${uri})`,
+  );
+}
+
 /** Renders a memory packet (the /memory/answer llms.txt-style markdown) in the
  * design system. memory:// citations become clickable badges that open the
  * cited node/chunk in a slide-over. */
@@ -34,7 +56,7 @@ export function PacketMarkdown({
             <li className="rounded-md border border-border bg-background px-3 py-2">{children}</li>
           ),
           blockquote: ({ children }) => (
-            <blockquote className="my-2 border-l-2 border-[var(--accent)] bg-muted/50 py-1.5 pl-3.5 pr-3 text-[13px] text-muted-foreground [&_p]:my-1">
+            <blockquote className="my-2.5 rounded-md border border-border border-l-2 border-l-[var(--accent)] bg-muted/50 px-3.5 py-2 text-[13px] text-muted-foreground [&_p]:my-1">
               {children}
             </blockquote>
           ),
@@ -70,7 +92,7 @@ export function PacketMarkdown({
           },
         }}
       >
-        {markdown}
+        {linkifyBareCitations(separateEvidence(markdown))}
       </Markdown>
     </div>
   );

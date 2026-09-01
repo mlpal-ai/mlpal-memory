@@ -18,6 +18,7 @@ import {
 import { cn } from "@/lib/cn";
 import { timeAgo } from "@/lib/format";
 import { useDebounced } from "@/lib/use-debounced";
+import { useWorkspace } from "@/lib/workspace";
 
 const PAGE_SIZE = 25;
 const STATUSES = ["pending", "processed", "dropped", "dead"] as const;
@@ -40,7 +41,7 @@ const STATUS_CHIP_ACTIVE: Record<EpisodeStatus, string> = {
 export function Episodes() {
   const [status, setStatus] = useState<"" | EpisodeStatus>("");
   const [source, setSource] = useState("");
-  const [workspace, setWorkspace] = useState("");
+  const [workspace, setWorkspace] = useWorkspace();
   const [offset, setOffset] = useState(0);
   const [episodes, setEpisodes] = useState<EpisodeOut[] | null>(null);
   const [total, setTotal] = useState(0);

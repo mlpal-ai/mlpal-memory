@@ -13,7 +13,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 MAX_DOC_CHARS = 40_000
-MAX_DOCS_PER_REPO = 5  # README + up to 4 docs/*.md, largest first
+MAX_DOCS_PER_REPO = 12  # README + recent docs/**.md — 5 starved doc-heavy repos
+# (x10 smoke: the integration guide lost its slot to newer design docs; the
+# answer class went unservable). Still bounded; recency-first admission.
 LANG_EXT = {
     ".py": "Python", ".ts": "TypeScript", ".tsx": "TypeScript", ".js": "JavaScript",
     ".go": "Go", ".rs": "Rust", ".java": "Java", ".rb": "Ruby", ".tf": "Terraform",
@@ -74,7 +76,25 @@ def scan_repo(repo: Path) -> RepoCard | None:
     candidates = [p for p in (repo / "README.md",) if p.exists()]
     docs_dir = repo / "docs"
     if docs_dir.is_dir():
-        extra = sorted(docs_dir.glob("*.md"), key=lambda p: p.stat().st_size, reverse=True)
+        # recursive: integration guides live in docs/<area>/ (x5 measured the miss —
+        # the authoritative answer sat in docs/integrations/, invisible to a flat glob).
+        # Admission is RECENCY-first (git last-commit date), not size-first: x5 round 4
+        # measured size-first admitting design tomes while missing the one focused,
+        # recently-updated guide that held the answer. Freshly-touched docs are the
+        # org's live knowledge; a stale tome can wait for a budget increase.
+        pool = [
+            p for p in docs_dir.rglob("*.md")
+            if not any(part.startswith(".") for part in p.relative_to(docs_dir).parts)
+        ]
+        def _doc_age(p: Path) -> datetime:
+            # uncommitted docs are the NEWEST work, not undated — fall back to
+            # mtime or recency-first silently buries exactly the freshest files
+            # (x10: the untracked integration guide sorted to the bottom)
+            return _git_file_date(repo, p) or datetime.fromtimestamp(
+                p.stat().st_mtime, tz=UTC
+            )
+
+        extra = sorted(pool, key=_doc_age, reverse=True)
         candidates.extend(extra[: MAX_DOCS_PER_REPO - len(candidates)])
     for p in candidates[:MAX_DOCS_PER_REPO]:
         try:

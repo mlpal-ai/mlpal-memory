@@ -28,9 +28,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from mlpal_memory_graph.collectors.claude_code import (  # noqa: E402
     iter_session_files,
-    parse_session,
+    parse_session_segments,
 )
 from mlpal_memory_graph.collectors.markdown import iter_md_docs  # noqa: E402
+from mlpal_memory_graph.collectors.pdfs import iter_pdfs  # noqa: E402
 from mlpal_memory_graph.collectors.repos import iter_repos  # noqa: E402
 from mlpal_memory_graph.collectors.state import CollectorState, content_sha  # noqa: E402
 
@@ -104,22 +105,27 @@ def collect_claude_code(ing: Ingestor, state: CollectorState, limit: int | None)
         if state.unchanged(key, sha):
             skipped += 1
             continue
-        doc = parse_session(path)
-        if doc is None:  # trivial session
+        docs = parse_session_segments(path)
+        if not docs:  # trivial session
             state.mark(key, sha)
             continue
-        ok = ing.document(
-            content=doc.text,
-            title=f"Claude Code session · {doc.workspace or 'home'} · "
-            f"{doc.started_at.date() if doc.started_at else 'undated'}",
-            scope="user",
-            scope_id=ing.user,
-            source="claude_code",
-            uri=str(doc.path),
-            workspace=doc.workspace,
-            valid_at=doc.started_at.isoformat() if doc.started_at else None,
-        )
-        if ok:
+        all_ok = True
+        for doc in docs:
+            day_note = f" · {doc.day}" if doc.day else (
+                f" · {doc.started_at.date()}" if doc.started_at else " · undated"
+            )
+            ok = ing.document(
+                content=doc.text,
+                title=f"Claude Code session · {doc.workspace or 'home'}{day_note}",
+                scope="user",
+                scope_id=ing.user,
+                source="claude_code",
+                uri=str(doc.path) + (f"#{doc.day}" if doc.day else ""),
+                workspace=doc.workspace,
+                valid_at=doc.started_at.isoformat() if doc.started_at else None,
+            )
+            all_ok = all_ok and ok
+        if all_ok:
             state.mark(key, sha)
             done += 1
             if done % 25 == 0:
@@ -152,6 +158,34 @@ def collect_md(ing: Ingestor, state: CollectorState, code_root: Path, limit: int
             state.mark(key, sha)
             done += 1
     print(f"  md/skills: {done} ingested, {skipped} unchanged")
+
+
+def collect_pdfs(ing: Ingestor, state: CollectorState, root: Path, limit: int | None) -> None:
+    print("▸ pdfs")
+    n = 0
+    for item in iter_pdfs(root):
+        if limit is not None and n >= limit:
+            break
+        if "skipped" in item:
+            print(f"    - skip {item['path'].name}: {item['skipped']}")
+            continue
+        key = f"pdf:{item['path']}"
+        sha = content_sha(item["content"])
+        if state.unchanged(key, sha):
+            continue
+        ok = ing.document(
+            content=item["content"],
+            title=f"pdf: {item['title']}",
+            scope="user",
+            scope_id=ing.user,
+            source="pdf_file",
+            uri=str(item["path"]),
+            valid_at=item["valid_at"].isoformat(),
+        )
+        if ok:
+            state.mark(key, sha)
+            n += 1
+    print(f"    {n} pdfs ingested")
 
 
 def collect_repos(ing: Ingestor, state: CollectorState, code_root: Path, limit: int | None) -> None:
@@ -209,7 +243,10 @@ def collect_repos(ing: Ingestor, state: CollectorState, code_root: Path, limit: 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--source", choices=["all", "claude-code", "md", "repos"], default="all")
+    ap.add_argument(
+        "--source", choices=["all", "claude-code", "md", "repos", "pdfs"], default="all"
+    )
+    ap.add_argument("--pdf-root", type=Path, default=None, help="root dir for --source pdfs")
     ap.add_argument("--base-url", default="http://localhost:8000")
     ap.add_argument("--org", default="local")
     ap.add_argument("--user", default=getpass.getuser())
@@ -238,6 +275,9 @@ def main() -> int:
         state.save()
     if args.source in ("all", "repos"):
         collect_repos(ing, state, args.code_root, args.limit)
+        state.save()
+    if args.source == "pdfs":  # explicit opt-in: PDF sweeps can be large
+        collect_pdfs(ing, state, args.pdf_root or args.code_root, args.limit)
         state.save()
 
     dt = time.monotonic() - t0

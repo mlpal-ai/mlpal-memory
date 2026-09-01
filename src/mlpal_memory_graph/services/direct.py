@@ -164,6 +164,8 @@ class DirectMemory:
         limit: int = 10,
         workspace: str | None = None,
         legs: set[str] | None = None,
+        as_of=None,
+        as_of_mode: str = "valid",
     ) -> list[ChunkHit]:
         """Retrieve passages across the accessible scopes only (hard scope predicate).
 
@@ -178,6 +180,22 @@ class DirectMemory:
         base = [or_(*[scope_clause(Chunk, tenant_id, s) for s in scopes])]
         if sources:
             base.append(Chunk.source.in_(sources))
+        if as_of is not None:
+            # Point-in-time reads must not see the future (x6 measured 9/12 as-of
+            # answers leaking post-instant knowledge before this filter existed).
+            # valid mode: the parent document's event time (falling back to ingest
+            # time when the source is undated); system mode: what the STORE knew.
+            from sqlalchemy import and_
+            from sqlalchemy import select as _select
+
+            if as_of_mode == "system":
+                time_ok = Document.ingested_at <= as_of
+            else:
+                time_ok = or_(
+                    Document.valid_at <= as_of,
+                    and_(Document.valid_at.is_(None), Document.ingested_at <= as_of),
+                )
+            base.append(Chunk.document_id.in_(_select(Document.id).where(time_ok)))
         if not query:
             rows = (await session.execute(select(Chunk).where(*base).limit(limit))).scalars()
             return [ChunkHit(c, 0.0) for c in rows]
@@ -286,6 +304,57 @@ class DirectMemory:
         for c in lexical:
             by_id[str(c.id)] = c
 
+        # -- title leg: document-level signal the chunk legs structurally lack --
+        # x5 round 4 measured ranking dilution as the corpus grew: chunks match on
+        # their own text only, so a focused guide loses to bulk mentions in large
+        # docs. Titles carry curated document-level vocabulary; the docs table is
+        # small, so on-the-fly title FTS is cheap. Chunks of title-matched docs
+        # join the fusion as a third ranked list.
+        title_chunks: list[Chunk] = []
+        if terms and "lexical" in legs:
+            doc_where = [or_(*[scope_clause(Document, tenant_id, s) for s in scopes])]
+            if session.bind.dialect.name == "postgresql":
+                from sqlalchemy import func as _f
+
+                any_tsq = _f.to_tsquery("english", " | ".join(terms))
+                title_docs = (
+                    (
+                        await session.execute(
+                            select(Document.id)
+                            .where(*doc_where, Document.title.isnot(None))
+                            .where(_f.to_tsvector("english", Document.title).op("@@")(any_tsq))
+                            .limit(20)
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+            else:
+                docs = (
+                    (await session.execute(select(Document).where(*doc_where)))
+                    .scalars()
+                    .all()
+                )
+                title_docs = [
+                    d.id
+                    for d in docs
+                    if d.title and any(t in d.title.lower() for t in terms)
+                ][:20]
+            if title_docs:
+                title_chunks = (
+                    (
+                        await session.execute(
+                            select(Chunk)
+                            .where(*base, Chunk.document_id.in_(title_docs))
+                            .limit(lex_overfetch)
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                for c in title_chunks:
+                    by_id[str(c.id)] = c
+
         # -- weighted RRF fusion --
         # A known-weak vector signal (dev-hash embedder) must not dilute the lexical leg
         # 1:1 (eval runs 182214→183737 measured exactly that dilution). Semantic
@@ -297,8 +366,9 @@ class DirectMemory:
             [
                 [str(c.id) for c, _ in semantic],
                 [str(c.id) for c in lexical],
+                [str(c.id) for c in title_chunks],
             ],
-            weights=[vector_weight, 1.0],
+            weights=[vector_weight, 1.0, 0.7],
         )
         # workspace focus, direct tier (the ablation run 192535 measured ZERO effect —
         # the boost only existed on the node path; passages are what agents mostly read)

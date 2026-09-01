@@ -34,7 +34,7 @@ router = APIRouter(prefix="/episodes", tags=["ingest"])
 async def ingest_episodes(
     body: IngestRequest,
     session: Annotated[AsyncSession, Depends(get_session)],
-    identity: Annotated[AuthIdentity, Depends(require_permission("memory:write"))],
+    identity: Annotated[AuthIdentity, Depends(require_permission("memory.write"))],
     process: bool = False,
 ) -> IngestResponse:
     settings = get_settings()
@@ -105,7 +105,7 @@ def _browse(identity: AuthIdentity):
 @router.get("", response_model=EpisodeListResponse)
 async def list_episodes(
     session: Annotated[AsyncSession, Depends(get_session)],
-    identity: Annotated[AuthIdentity, Depends(require_permission("memory:read"))],
+    identity: Annotated[AuthIdentity, Depends(require_permission("memory.read"))],
     status: str | None = Query(None, pattern="^(pending|processed|dropped|dead)$"),
     source: str | None = Query(None),
     workspace: str | None = Query(None),
@@ -156,7 +156,7 @@ async def list_episodes(
 async def get_episode(
     event_id: str,
     session: Annotated[AsyncSession, Depends(get_session)],
-    identity: Annotated[AuthIdentity, Depends(require_permission("memory:read"))],
+    identity: Annotated[AuthIdentity, Depends(require_permission("memory.read"))],
 ) -> EpisodeDetailResponse:
     e = (
         await session.execute(

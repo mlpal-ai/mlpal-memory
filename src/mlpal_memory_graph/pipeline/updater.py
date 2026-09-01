@@ -105,6 +105,19 @@ class Updater:
             extraction.entities.extend(llm_ex.entities)
             extraction.edges.extend(llm_ex.edges)
             extraction.invalidations.extend(llm_ex.invalidations)
+        # watched-value pass (x6/x6b/x6c): runs on the redacted content; HAS_VALUE is
+        # functional so the existing supersession machinery maintains "the current
+        # value" bitemporally. Tiered: pattern (free, deterministic) | llm (precision
+        # — the pattern tier's ceiling was measured across three x6c retune rounds).
+        from ..core.config import get_settings as _gs
+        from .value_facts import extract_value_specs, llm_extract_value_specs
+
+        if _gs().value_extractor == "llm":
+            v_entities, v_edges = await llm_extract_value_specs(episode.content)
+        else:
+            v_entities, v_edges = extract_value_specs(episode.content)
+        extraction.entities.extend(v_entities)
+        extraction.edges.extend(v_edges)
         # v3 distillation: session documents get ONE insight-distillation pass (typed
         # Convention/Decision/Gotcha/HowTo/Preference nodes with evidence spans). Cost is
         # bounded by design: per session, never per turn; only for distill_sources.
@@ -193,6 +206,42 @@ class Updater:
                 await self.driver.invalidate_superseded(
                     session, tenant_id=tenant_id, scope=scope, new_edge=edge
                 )
+                if e.type == "HAS_VALUE":
+                    # current-view fact hygiene: a value node whose HAS_VALUE edge is
+                    # closed is SUPERSEDED — packets must stop serving it as a fact
+                    # while as-of reads still reconstruct it via edge validity.
+                    # Set-based + idempotent; also covers the backfill case (the NEW
+                    # edge got bounded → its own dst is marked).
+                    from sqlalchemy import select as _sel
+                    from sqlalchemy import update as _upd
+
+                    from ..db.models import Edge as _E
+                    from ..db.models import Node as _N
+
+                    open_dsts = _sel(_E.dst_id).where(
+                        _E.src_id == edge.src_id,
+                        _E.type == "HAS_VALUE",
+                        _E.invalid_at.is_(None),
+                    )
+                    closed_dsts = _sel(_E.dst_id).where(
+                        _E.src_id == edge.src_id,
+                        _E.type == "HAS_VALUE",
+                        _E.invalid_at.isnot(None),
+                    )
+                    await session.execute(
+                        _upd(_N)
+                        .where(
+                            _N.id.in_(closed_dsts),
+                            _N.id.notin_(open_dsts),  # a re-observed value is NOT superseded
+                            _N.status != "superseded",
+                        )
+                        .values(status="superseded")
+                    )
+                    await session.execute(  # re-observation reopens a formerly-superseded value
+                        _upd(_N)
+                        .where(_N.id.in_(open_dsts), _N.status == "superseded")
+                        .values(status="committed")
+                    )
             elif self.llm_enabled:
                 # non-functional/ambiguous → LLM contradiction judge over similar candidates (D1)
                 judged += await judge_and_invalidate(

@@ -44,6 +44,17 @@ services:
       # Override to `gateway` (+ export MLPAL_EMBEDDINGS_API_KEY) for production embeddings.
       MLPAL_EMBEDDINGS_PROVIDER: ${MLPAL_EMBEDDINGS_PROVIDER:-local}
       MLPAL_EMBEDDINGS_API_KEY: ${MLPAL_EMBEDDINGS_API_KEY:-}
+      # gateway key for the OPTIONAL answer-synthesis mode (x5). Absent -> synthesis
+      # requests fail loudly; mode=packet (default) never needs it.
+      MLPAL_LLM_API_KEY: ${MLPAL_LLM_API_KEY:-}
+      # extraction tier: rule (default, deterministic) | llm (adds gateway extraction
+      # + contradiction judge on content episodes — the derived-tier full path)
+      MLPAL_EXTRACTOR: ${MLPAL_EXTRACTOR:-rule}
+      # watched-value tier: pattern (free default) | llm (precision; needs LLM key)
+      MLPAL_VALUE_EXTRACTOR: ${MLPAL_VALUE_EXTRACTOR:-pattern}
+      # dev-identity hint for the local UI (owner of the local corpus)
+      MLPAL_DEMO_ORG_ID: local
+      MLPAL_DEMO_USER_ID: ${USER:-demo}
       FASTEMBED_CACHE_PATH: /var/cache/fastembed
       # appuser has no home dir; HF's downloader needs a writable cache root
       HF_HOME: /var/cache/fastembed/hf

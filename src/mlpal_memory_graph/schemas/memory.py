@@ -120,7 +120,39 @@ class AnswerResponse(BaseModel):
     contested: int
     gaps: list[str] = []
     top_fact_id: str | None = None
+    # answer mode: packet (deterministic) | synthesized | hybrid | hop — see x5
+    mode: str = "packet"
+    synth_model: str | None = None
+    synth_ms: int | None = None
+    # hop mode: model calls spent + the queries the loop actually executed (audit trace)
+    hops: int | None = None
+    hop_trace: list[str] | None = None
+    # server-enforced grounding: citations stripped because they were never retrieved
+    invented_citations: int = 0
     took_ms: int
+
+
+class MetricValueOut(BaseModel):
+    value: str
+    display: str
+    valid_at: datetime | None
+    invalid_at: datetime | None
+    current: bool
+    evidence_span: str | None = None
+
+
+class MetricHistoryOut(BaseModel):
+    key: str
+    label: str
+    workspace: str | None
+    values: list[MetricValueOut]
+
+
+class MetricsResponse(BaseModel):
+    """Watched-value histories (timeline UI): every value a metric has held, with
+    validity windows — supersession made visible."""
+
+    metrics: list[MetricHistoryOut]
 
 
 class StoreStats(BaseModel):

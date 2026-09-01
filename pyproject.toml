@@ -24,6 +24,8 @@ pg = ["pgvector>=0.3", "psycopg2-binary>=2.9"]
 # imports so the package stays installable without them). The deployed image must build with
 # `.[mcp]` or `python -m mlpal_memory_graph.mcp_server` exits with "requires extras".
 mcp = ["fastmcp>=3.2.4"]
+# PDF ingestion (data plane: multimodal sources beyond text/markdown).
+pdf = ["pypdf>=4"]
 # Real semantic embeddings in-process (ONNX, no gateway key) — the OSS default retrieval path.
 # Select with MLPAL_EMBEDDINGS_PROVIDER=local; first use downloads the model (~30MB, cached).
 local-embeddings = ["fastembed>=0.4"]

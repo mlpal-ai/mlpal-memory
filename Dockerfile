@@ -38,6 +38,9 @@ COPY --from=builder /usr/local/bin /usr/local/bin
 # Copy application code
 COPY src/ ./src/
 COPY alembic/ ./alembic/
+# Built Vite app (run `npm run build` in ui-app/ before docker build); legacy ui/
+# stays as main.py's fallback when dist is absent.
+COPY ui-app/dist/ ./ui-app/dist/
 COPY ui/ ./ui/
 COPY alembic.ini .
 COPY pyproject.toml README.md ./

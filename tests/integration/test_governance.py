@@ -108,7 +108,7 @@ ADMIN = {"X-Test-Org-Id": "orgZ", "X-Test-User-Id": "boss"}
 ALICE = {
     "X-Test-Org-Id": "orgZ",
     "X-Test-User-Id": "alice",
-    "X-Test-Permissions": "memory:read,memory:write",
+    "X-Test-Permissions": "memory.read,memory.write",
 }
 
 

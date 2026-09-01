@@ -15,7 +15,7 @@ def _headers(user: str) -> dict:
     return {
         "X-Test-Org-Id": ORG,
         "X-Test-User-Id": user,
-        "X-Test-Permissions": "memory:read,memory:write",
+        "X-Test-Permissions": "memory.read,memory.write",
     }
 
 

@@ -29,6 +29,9 @@ class SessionDoc:
     started_at: datetime | None
     turns: int
     text: str
+    # set when this doc is one DAY of a multi-day resumed session (P0.4 — x6 recon:
+    # a 5-week continuously-resumed session must not carry one valid_at)
+    day: str | None = None
 
 
 def _text_of_content(content) -> str:
@@ -47,11 +50,20 @@ def _text_of_content(content) -> str:
 
 
 def parse_session(path: Path) -> SessionDoc | None:
+    """Single-document view of a session (first segment when multi-day)."""
+    segs = parse_session_segments(path)
+    return segs[0] if segs else None
+
+
+def parse_session_segments(path: Path) -> list[SessionDoc]:
     session_id = path.stem
     workspace: str | None = None
     started_at: datetime | None = None
-    lines: list[str] = []
-    user_turns = 0
+    # (day, line) pairs; day "" when the record carries no timestamp
+    lines: list[tuple[str, str]] = []
+    day_first_ts: dict[str, datetime] = {}
+    user_turns_by_day: dict[str, int] = {}
+    current_day = ""
 
     with path.open(encoding="utf-8", errors="replace") as fh:
         for raw in fh:
@@ -66,9 +78,13 @@ def parse_session(path: Path) -> SessionDoc | None:
                 continue
             if workspace is None and rec.get("cwd"):
                 workspace = Path(rec["cwd"]).name or None
-            if started_at is None and rec.get("timestamp"):
+            ts = rec.get("timestamp") or rec.get("ts")
+            if ts:
                 try:
-                    started_at = datetime.fromisoformat(rec["timestamp"].replace("Z", "+00:00"))
+                    parsed = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+                    started_at = started_at or parsed
+                    current_day = str(ts)[:10]
+                    day_first_ts.setdefault(current_day, parsed)
                 except ValueError:
                     pass
             msg = rec.get("message") or {}
@@ -81,33 +97,59 @@ def parse_session(path: Path) -> SessionDoc | None:
                     continue
                 text = _text_of_content(content)
                 if text:
-                    user_turns += 1
-                    lines.append(f"USER: {text}")
+                    user_turns_by_day[current_day] = user_turns_by_day.get(current_day, 0) + 1
+                    lines.append((current_day, f"USER: {text}"))
             else:
                 text = _text_of_content(content)
                 if text:
-                    lines.append(f"ASSISTANT: {text}")
+                    lines.append((current_day, f"ASSISTANT: {text}"))
 
-    if user_turns < MIN_USER_TURNS:
-        return None
     project_slug = path.parent.name.lower()
     if any(marker in project_slug for marker in NOISE_WORKSPACE_MARKERS):
-        return None
-    text = "\n\n".join(lines)
-    if len(text) < MIN_DOC_CHARS:
-        return None
-    if len(text) > MAX_DOC_CHARS:
-        # keep the head and tail — openings state intent, endings state outcomes
-        half = MAX_DOC_CHARS // 2
-        text = text[:half] + "\n\n[... session truncated ...]\n\n" + text[-half:]
-    return SessionDoc(
-        session_id=session_id,
-        path=path,
-        workspace=workspace,
-        started_at=started_at,
-        turns=user_turns,
-        text=text,
-    )
+        return []
+    days = sorted({d for d, _ in lines})
+    multi_day = len([d for d in days if d]) > 1
+
+    def _finish(text: str, turns: int, day: str | None, start: datetime | None):
+        if turns < MIN_USER_TURNS or len(text) < MIN_DOC_CHARS:
+            return None
+        if len(text) > MAX_DOC_CHARS:
+            # keep the head and tail — openings state intent, endings state outcomes
+            half = MAX_DOC_CHARS // 2
+            text = text[:half] + "\n\n[... session truncated ...]\n\n" + text[-half:]
+        return SessionDoc(
+            session_id=session_id + (f"#{day}" if day else ""),
+            path=path,
+            workspace=workspace,
+            started_at=start,
+            turns=turns,
+            text=text,
+            day=day,
+        )
+
+    if not multi_day:
+        doc = _finish(
+            "\n\n".join(t for _, t in lines),
+            sum(user_turns_by_day.values()),
+            None,
+            started_at,
+        )
+        return [doc] if doc else []
+    # multi-day resumed session: one document per active day, each with ITS OWN
+    # event time — five weeks of shifting truth must not share one valid_at (P0.4)
+    out: list[SessionDoc] = []
+    for day in days:
+        if not day:
+            continue
+        doc = _finish(
+            "\n\n".join(t for d, t in lines if d == day),
+            user_turns_by_day.get(day, 0),
+            day,
+            day_first_ts.get(day),
+        )
+        if doc:
+            out.append(doc)
+    return out
 
 
 def iter_session_files(projects_dir: Path = DEFAULT_PROJECTS_DIR):

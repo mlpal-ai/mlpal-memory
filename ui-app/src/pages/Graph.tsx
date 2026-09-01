@@ -1,6 +1,6 @@
 import type { Core } from "cytoscape";
-import { Waypoints } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { Waypoints, X } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { NodeDetail } from "@/components/NodeDetail";
@@ -16,6 +16,12 @@ import {
   getProjection,
   searchMemory,
 } from "@/lib/api";
+import { plural } from "@/lib/format";
+import { useDismissed } from "@/lib/use-dismissed";
+import { useWorkspace } from "@/lib/workspace";
+
+// Queries that demo the graph well on the seeded corpora.
+const SUGGESTIONS = ["platform cost", "migration decisions", "deploy"];
 
 /** Resolve the design tokens cytoscape needs — canvas styles can't read CSS
  * vars, so they are materialized per render and re-applied on theme flips.
@@ -99,7 +105,8 @@ function applyStyle(cy: Core) {
 
 export function Graph() {
   const [q, setQ] = useState("");
-  const [workspace, setWorkspace] = useState("");
+  const [workspace, setWorkspace] = useWorkspace();
+  const [explainerDismissed, dismissExplainer] = useDismissed("mlpal.memory.graph-explainer");
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<SearchResponse | null>(null);
   const [drawn, setDrawn] = useState<{ nodes: number; edges: number } | null>(null);
@@ -130,14 +137,16 @@ export function Graph() {
     [],
   );
 
-  async function explore() {
-    const trimmed = q.trim();
+  async function explore(query = q, ws = workspace) {
+    const trimmed = query.trim();
     if (!trimmed) return;
     setLoading(true);
     try {
       const res = await searchMemory({
         q: trimmed,
-        workspace: workspace.trim() || undefined,
+        workspace: ws.trim() || undefined,
+        // focus is a promise: when a workspace is set, hard-bound the graph to it
+        workspace_mode: ws.trim() ? "filter" : undefined,
         limit: 20,
         depth: 1,
       });
@@ -203,6 +212,16 @@ export function Graph() {
     }
   }
 
+  // Distinct workspaces in the result — a broad query over the whole tenant
+  // mixes unrelated corpora, which reads as noise to a first-time user.
+  const workspacesFound = useMemo(
+    () =>
+      [
+        ...new Set((result?.nodes ?? []).map((n) => n.workspace).filter((w): w is string => !!w)),
+      ].sort(),
+    [result],
+  );
+
   return (
     <div className="flex flex-col gap-6">
       <div>
@@ -239,14 +258,81 @@ export function Graph() {
         </button>
       </div>
 
+      <div className="flex flex-wrap gap-2">
+        {SUGGESTIONS.map((s) => (
+          <button
+            key={s}
+            onClick={() => {
+              setQ(s);
+              void explore(s);
+            }}
+            className="rounded-full border border-border px-3 py-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+          >
+            {s}
+          </button>
+        ))}
+      </div>
+
+      {!explainerDismissed && (
+        <div className="flex items-start gap-3 rounded-lg border border-border bg-muted/40 px-4 py-2.5 text-xs text-muted-foreground">
+          <span className="leading-relaxed">
+            <span className="font-medium text-foreground">Nodes</span> are typed facts memory
+            derived from your sources — size means observed more often, a red ring means writers
+            disagree. <span className="font-medium text-foreground">Edges</span> are typed
+            relations between them. Click anything.
+          </span>
+          <button
+            onClick={dismissExplainer}
+            aria-label="Dismiss explainer"
+            className="shrink-0 rounded-md p-0.5 transition-colors hover:bg-muted hover:text-foreground"
+          >
+            <X className="size-3.5" />
+          </button>
+        </div>
+      )}
+
+      {/* a focused query can still pull the odd cross-workspace neighbor at
+          depth 1, so the nudge only makes sense while no workspace is set */}
+      {workspacesFound.length > 1 && workspace.trim() === "" && (
+        <div className="flex flex-wrap items-center gap-2 rounded-lg bg-[var(--warning-bg)] px-4 py-2.5 text-xs text-[var(--warning)]">
+          <span className="font-medium">
+            Results span {workspacesFound.length} workspaces — set a workspace to focus:
+          </span>
+          {workspacesFound.map((w) => (
+            <button
+              key={w}
+              onClick={() => {
+                setWorkspace(w);
+                void explore(q, w);
+              }}
+              className="rounded-full border border-current/40 px-2.5 py-0.5 font-mono font-medium transition-opacity hover:opacity-70"
+            >
+              {w}
+            </button>
+          ))}
+        </div>
+      )}
+
       <Card>
         <CardContent className="relative p-0">
           <div ref={containerRef} className="h-[26rem] w-full rounded-xl" />
           {result === null && (
-            <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
-              <p className="text-sm text-muted-foreground">
-                {loading ? "Resolving…" : "Run a query to draw its neighborhood."}
-              </p>
+            <div className="pointer-events-none absolute inset-0 flex items-center justify-center p-8">
+              {loading ? (
+                <p className="text-sm text-muted-foreground">Resolving…</p>
+              ) : (
+                <div className="flex max-w-md flex-col gap-2 text-center text-sm text-muted-foreground">
+                  <p>
+                    <span className="font-medium text-foreground">This is derived memory, drawn.</span>{" "}
+                    Search anything and the graph shows the typed facts memory extracted around
+                    it, connected by typed relations formed at fold time.
+                  </p>
+                  <p className="font-mono text-xs">
+                    ● fact —HAS_VALUE→ ● value —SUPERSEDES→ ● older value
+                  </p>
+                  <p className="text-xs">Try a suggestion above, or search "platform cost".</p>
+                </div>
+              )}
             </div>
           )}
         </CardContent>
@@ -254,9 +340,16 @@ export function Graph() {
 
       {result !== null && drawn !== null && (
         <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-          <Badge variant="secondary">{drawn.nodes} nodes</Badge>
-          <Badge variant="secondary">{drawn.edges} edges</Badge>
+          <Badge variant="secondary">{plural(drawn.nodes, "node")}</Badge>
+          <Badge variant="secondary">{plural(drawn.edges, "edge")}</Badge>
           <span>Scope shades: narrower memory renders stronger; selected turns amber.</span>
+        </div>
+      )}
+
+      {drawn !== null && drawn.nodes > 0 && drawn.edges === 0 && (
+        <div className="rounded-lg border border-border bg-muted/40 px-4 py-2.5 text-xs text-muted-foreground">
+          These facts have no stored relations yet — relations form at fold time (SUPERSEDES,
+          CONTRADICTS, HAS_VALUE…). Try "platform cost" in workspace <code>aws-migration</code>.
         </div>
       )}
 
@@ -265,7 +358,7 @@ export function Graph() {
           <CardHeader className="flex-row items-center justify-between">
             <CardTitle className="text-sm">Projection — the always-on tier</CardTitle>
             <span className="text-xs text-muted-foreground">
-              {projection.fact_count} facts · ~{projection.estimated_tokens} tokens
+              {plural(projection.fact_count, "fact")} · ~{projection.estimated_tokens} tokens
               {projection.truncated && " · truncated"}
             </span>
           </CardHeader>

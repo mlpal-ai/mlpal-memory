@@ -123,7 +123,7 @@ async def test_service_key_may_target_a_tenant(client):
 async def test_cannot_plant_in_another_users_personal_scope(client):
     # a non-admin caller can't write to someone else's user scope (mirrors document ingest guard).
     # dev-auth defaults to ['*'] (admin), so pin non-admin perms to exercise the guard.
-    alice_user = {**ALICE_A, "X-Test-Permissions": "memory:read,memory:write"}
+    alice_user = {**ALICE_A, "X-Test-Permissions": "memory.read,memory.write"}
     r = await client.post(
         "/api/v1/episodes?process=true",
         json={
@@ -145,7 +145,7 @@ async def test_cannot_plant_in_another_users_personal_scope(client):
 async def test_non_admin_cannot_write_subject_scope(client):
     # HARD GATE: subject scopes (team/service/repo/agent) need per-subject write authz we don't
     # model yet, so a non-admin/non-service caller is refused (task #21).
-    alice_user = {**ALICE_A, "X-Test-Permissions": "memory:read,memory:write"}
+    alice_user = {**ALICE_A, "X-Test-Permissions": "memory.read,memory.write"}
     r = await client.post(
         "/api/v1/episodes?process=true",
         json={

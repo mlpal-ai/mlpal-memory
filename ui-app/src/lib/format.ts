@@ -18,6 +18,11 @@ export function fmtDate(iso: string | null): string {
   return iso ? iso.slice(0, 10) : "undated";
 }
 
+/** "1 edge", "3 edges" — every interpolated count goes through this. */
+export function plural(count: number, noun: string, pluralForm?: string): string {
+  return `${count} ${count === 1 ? noun : (pluralForm ?? `${noun}s`)}`;
+}
+
 /** Retrieval scores are small RRF-style fractions — 3 significant digits reads
  * better than a wall of zeros. */
 export function fmtScore(score: number): string {

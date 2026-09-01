@@ -64,11 +64,26 @@ class Settings(BaseSettings):
     # audit/replay, excluded from the worker cursor) instead of retrying forever.
     updater_max_retries: int = 5
 
+    # --- answer synthesis (x5 experiment surface; default read path stays LLM-free) ---
+    # /memory/answer?mode=synthesized|hybrid composes a cited natural-language answer
+    # FROM the deterministic packet via one gateway call. mode=packet (default) never
+    # touches a model. llm_api_key: mlpal_ prefix -> Bearer (public gateway); empty ->
+    # internal_service_api_key (in-cluster).
+    answer_synthesis_model: str = "claude-haiku-4-5-20251001"
+    llm_api_key: str = ""
+
+    # watched-value extraction tier: pattern (deterministic, free, OSS default) |
+    # llm (precision tier — one haiku call per coarsely-matching doc; x6c measured
+    # the pattern tier's precision ceiling on narrative corpora)
+    value_extractor: str = "pattern"
+
     # --- extraction: rule | llm ---
     # "rule" = deterministic only (cheap path). "llm" = also run the LLM extractor + contradiction
     # judge on content-bearing high-salience episodes (the cost-tiered 'full' tier).
     extractor: str = "rule"
-    llm_model: str = "claude-haiku-4-5"  # cheap Claude (Haiku-class) for extraction via gateway
+    # cheap Claude (Haiku-class) via gateway; full dated tag — the public gateway 400s
+    # on bare aliases (learned in x2)
+    llm_model: str = "claude-haiku-4-5-20251001"
     llm_max_tokens: int = 1500
     # provenance stamped on every LLM-extracted fact so a write is auditable/replayable. Bump
     # prompt_version when the extraction prompt changes, extraction_version for code/schema changes.

@@ -21,6 +21,7 @@ bypass decay entirely (the past is exactly as true as it was).
 from __future__ import annotations
 
 import math
+import re
 from datetime import UTC, datetime
 
 RECENCY_HALF_LIFE_DAYS = 180.0
@@ -69,20 +70,51 @@ def _fact_line(m) -> str:
 FAILED_SOURCE_SUFFIX = "_failed"
 FAILED_EVIDENCE_FACTOR = 0.6  # verified-run evidence outranks failed-run at equal relevance
 
+# x11 finding: the store SERVED the current value (a MetricValue fact) while five
+# older verbatim passages shouted the superseded one — and the reader followed the
+# louder evidence. When a current watched value answers the query, it must LEAD the
+# packet and older evidence must carry a predates label; a terse fact line buried
+# under confident stale quotes loses the salience battle every time.
+_QUERY_STOP = frozenset(
+    "a an and are as at be but by did do does for from had has have how i in is it my not now of on or our per run runs s so that the then this to today was we what when which who will with you your".split()
+)
+
+
+def _tokens(text: str) -> set[str]:
+    return {t for t in re.findall(r"[a-z0-9.$/]+", text.lower()) if t not in _QUERY_STOP}
+
+
+def _leading_value_fact(query: str, facts: list, value_since: dict):
+    """Highest-ranked CURRENT MetricValue fact whose anchor overlaps the query (>=2
+    tokens), plus the valid-from of its live HAS_VALUE edge (``value_since`` maps
+    node id -> valid_at, supplied by the call site's one IN-query)."""
+    qtok = _tokens(query)
+    for m in facts:
+        n = m.node
+        if n.type != "MetricValue":
+            continue
+        if len(qtok & _tokens(n.name.split("=", 1)[0])) < 2:
+            continue
+        return m, _as_utc(value_since.get(n.id))
+    return None, None
+
 
 def _from_failed_run(chunk) -> bool:
     return bool(chunk.source) and chunk.source.endswith(FAILED_SOURCE_SUFFIX)
 
 
-def _passage_block(hit, doc_meta: dict) -> str:
+def _passage_block(hit, doc_meta: dict, value_since: datetime | None = None) -> str:
     chunk = hit.chunk
     meta = doc_meta.get(chunk.document_id, {})
     title = meta.get("title") or chunk.source or "passage"
+    valid_at = _as_utc(meta.get("valid_at"))
     when = _date(meta.get("valid_at"))
     excerpt = " ".join(chunk.content.split())
     if len(excerpt) > EXCERPT_CHARS:
         excerpt = excerpt[:EXCERPT_CHARS].rsplit(" ", 1)[0] + " …"
     block = f'> "{excerpt}"\n> — [{title}](memory://chunk/{chunk.id}), {when}'
+    if value_since is not None and valid_at is not None and valid_at < value_since:
+        block += "\n> ⚠ predates the current value above — historical, not current truth."
     if _from_failed_run(chunk):
         # x3 finding 4: a failed run's confident narrative ("Found it…") outpersuades a
         # terse correct fact. Every tier reaching the context window carries outcome
@@ -100,6 +132,7 @@ def build_packet(
     as_of: datetime | None = None,
     workspace: str | None = None,
     agent_mode: bool = False,
+    value_since: dict | None = None,
 ) -> tuple[str, dict]:
     """Assemble the markdown packet + a structured summary (for the JSON envelope).
 
@@ -117,6 +150,10 @@ def build_packet(
         key=lambda m: (m.score, m.node.observed_count or 1),
         reverse=True,
     )
+    # superseded value-facts never appear as CURRENT facts (x6c: the one persistent
+    # stale-served failure). As-of reads reconstruct them via edge validity instead.
+    if as_of is None:
+        ranked_nodes = [m for m in ranked_nodes if m.node.status != "superseded"]
     unverified = [
         m for m in ranked_nodes
         if (m.node.props or {}).get("hypothesis_from_failed_attempt")
@@ -144,16 +181,37 @@ def build_packet(
     passages = all_passages[:MAX_PASSAGES]
     contested = [m for m in facts if m.contested]
 
+    # x11: a current watched value that answers the query leads the packet;
+    # as-of reads keep today's behavior (point-in-time truth has no "current").
+    value_lead, value_since_dt = (None, None) if as_of is not None else _leading_value_fact(
+        query, facts, value_since or {}
+    )
+    if value_lead is not None:
+        facts.remove(value_lead)
+        facts.insert(0, value_lead)
+
     lines: list[str] = [f"# {query}"]
     scope_note = f" · workspace `{workspace}`" if workspace else ""
     asof_note = f" · as of {_date(as_of)}" if as_of else ""
 
-    if facts:
+    if value_lead is not None:
+        since_note = (
+            f" (current since {_date(value_since_dt)})" if value_since_dt else " (current value)"
+        )
+        lines.append(
+            f"> {value_lead.node.name}{since_note}. "
+            "Older evidence below may predate this value."
+        )
+    elif facts:
         top = facts[0].node
         lines.append(f"> {top.name}{'. ' + top.summary if top.summary else ''}")
     elif passages:
-        first = " ".join(passages[0].chunk.content.split())[:160]
-        lines.append(f"> {first} …")
+        # never masquerade a passage as the answer (UI QA 2026-08-31: an irrelevant
+        # top passage rendered as the TL;DR reads as a confident wrong answer)
+        lines.append(
+            f"> No vetted facts for this query — {len(passages)} verbatim passages "
+            "below; treat them as unvetted context, not an answer."
+        )
     else:
         lines.append("> Memory holds no relevant knowledge for this query.")
     lines.append(f"_{len(facts)} facts · {len(passages)} passages{scope_note}{asof_note}_")
@@ -164,7 +222,7 @@ def build_packet(
 
     if passages:
         lines.append("\n## Evidence")
-        lines.extend(_passage_block(h, doc_meta) for h in passages)
+        lines.extend(_passage_block(h, doc_meta, value_since_dt) for h in passages)
 
     if contested:
         lines.append("\n## Contested")
@@ -221,5 +279,9 @@ def build_packet(
         "unverified": len(unverified),
         "gaps": gaps,
         "top_fact_id": facts[0].node.id if facts else None,
+        # exactly what was SERVED (not merely retrieved) — the usage-counter truth
+        # the retention policy is measured against (migration 0014)
+        "served_chunk_ids": [h.chunk.id for h in passages],
+        "served_node_ids": [m.node.id for m in facts + unverified],
     }
     return "\n".join(lines), summary

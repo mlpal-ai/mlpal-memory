@@ -9,7 +9,7 @@ import pytest
 ALICE = {
     "X-Test-Org-Id": "orgA",
     "X-Test-User-Id": "alice",
-    "X-Test-Permissions": "memory:read,memory:write",
+    "X-Test-Permissions": "memory.read,memory.write",
 }
 BOB = {**ALICE, "X-Test-User-Id": "bob"}
 OTHER_ORG = {**ALICE, "X-Test-Org-Id": "orgB", "X-Test-User-Id": "carol"}
@@ -86,3 +86,25 @@ async def test_episode_ledger_status_and_privacy(client):
     assert (
         await client.get(f"/api/v1/episodes/{ep['event_id']}", headers=BOB)
     ).status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_document_order_valid_spans_history(client):
+    """order=valid returns event-time ascending — the timeline's span, not
+    yesterday's ingests (UI bug: newest-first collapsed the as-of slider)."""
+    from datetime import UTC, datetime, timedelta
+
+    now = datetime.now(UTC)
+    for days, txt in ((400, "ancient scroll of ordering"), (5, "fresh note of ordering")):
+        r = await client.post(
+            "/api/v1/documents",
+            json={"content": txt * 3, "title": txt, "scope": "user", "scope_id": "alice",
+                  "source": "md_file", "workspace": "ord-lab",
+                  "valid_at": (now - timedelta(days=days)).isoformat()},
+            headers=ALICE,
+        )
+        assert r.status_code == 202
+    r = await client.get("/api/v1/documents",
+                         params={"workspace": "ord-lab", "order": "valid"}, headers=ALICE)
+    titles = [d["title"] for d in r.json()["documents"]]
+    assert titles.index("ancient scroll of ordering") < titles.index("fresh note of ordering")

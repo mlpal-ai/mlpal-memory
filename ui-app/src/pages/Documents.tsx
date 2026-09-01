@@ -18,12 +18,13 @@ import {
 import { cn } from "@/lib/cn";
 import { fmtDate, timeAgo } from "@/lib/format";
 import { useDebounced } from "@/lib/use-debounced";
+import { useWorkspace } from "@/lib/workspace";
 
 const PAGE_SIZE = 25;
 
 export function Documents() {
   const [q, setQ] = useState("");
-  const [workspace, setWorkspace] = useState("");
+  const [workspace, setWorkspace] = useWorkspace();
   const [source, setSource] = useState("");
   const [offset, setOffset] = useState(0);
   const [docs, setDocs] = useState<DocumentOut[] | null>(null);
@@ -255,8 +256,9 @@ function Chip({
 }
 
 /** Slide-over for a stored document: metadata + the ordered verbatim chunks
- * exactly as the retriever sees them. Fetches /documents/{id} itself. */
-function DocumentDetail({ documentId, onClose }: { documentId: string; onClose: () => void }) {
+ * exactly as the retriever sees them. Fetches /documents/{id} itself.
+ * Exported: the Timeline page opens the same panel from its day groups. */
+export function DocumentDetail({ documentId, onClose }: { documentId: string; onClose: () => void }) {
   const [doc, setDoc] = useState<DocumentDetailResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
 

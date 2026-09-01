@@ -29,6 +29,13 @@ class LLMClient(ABC):
     ) -> dict:
         """Return the model's structured JSON output for ``schema`` ({} on parse failure)."""
 
+    @abstractmethod
+    async def complete_text(
+        self, *, system: str, user: str, model: str | None = None, max_tokens: int | None = None
+    ) -> tuple[str, dict]:
+        """Return (text, usage) for a plain completion. ``model`` overrides the default
+        (the x5 answer-synthesis experiment compares model tiers on the same packet)."""
+
 
 class GatewayLLMClient(LLMClient):
     def __init__(
@@ -40,10 +47,34 @@ class GatewayLLMClient(LLMClient):
         self.api_key = api_key
         self.max_tokens = max_tokens
 
-    async def complete_json(self, *, system, user, schema, max_tokens=None) -> dict:
+    def _headers(self) -> dict[str, str]:
         headers = {"Content-Type": "application/json"}
-        if self.api_key:
-            headers["X-Internal-Service-Key"] = self.api_key
+        if self.api_key and self.api_key.startswith("mlpal_"):
+            headers["Authorization"] = f"Bearer {self.api_key}"  # public gateway key
+        elif self.api_key:
+            headers["X-Internal-Service-Key"] = self.api_key  # in-cluster path
+        return headers
+
+    async def complete_text(self, *, system, user, model=None, max_tokens=None) -> tuple[str, dict]:
+        body = {
+            "model": model or self.model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            "max_tokens": max_tokens or self.max_tokens,
+            "temperature": 0,
+        }
+        async with httpx.AsyncClient(timeout=60) as client:
+            r = await client.post(
+                f"{self.base_url}/v1/chat/completions", json=body, headers=self._headers()
+            )
+            r.raise_for_status()
+            data = r.json()
+        return str(data.get("content") or ""), dict(data.get("usage") or {})
+
+    async def complete_json(self, *, system, user, schema, max_tokens=None) -> dict:
+        headers = self._headers()
         body = {
             "model": self.model,
             "messages": [
@@ -77,5 +108,8 @@ class GatewayLLMClient(LLMClient):
 def get_llm_client() -> LLMClient:
     s = get_settings()
     return GatewayLLMClient(
-        s.embeddings_service_url, s.llm_model, s.internal_service_api_key, s.llm_max_tokens
+        s.embeddings_service_url,
+        s.llm_model,
+        s.llm_api_key or s.internal_service_api_key,
+        s.llm_max_tokens,
     )

@@ -204,6 +204,8 @@ class Retrieval:
                 limit=limit,
                 workspace=ctx.workspace,
                 legs=legs,
+                as_of=as_of,
+                as_of_mode=as_of_mode,
             )
 
         if trace is None:  # origin == "direct": still surface which scopes were considered

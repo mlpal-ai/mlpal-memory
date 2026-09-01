@@ -35,7 +35,7 @@ async def _seed_org_node_with_personal_edge(session):
     return org_node, bob_node
 
 
-def _headers(user: str, perms: str = "memory:read") -> dict:
+def _headers(user: str, perms: str = "memory.read") -> dict:
     return {
         "X-Test-Org-Id": ORG,
         "X-Test-User-Id": user,
@@ -70,13 +70,13 @@ async def test_team_node_requires_membership(client, session):
     assert r.status_code == 403
 
     r = await client.get(
-        f"/api/v1/memory/nodes/{node.id}", headers=_headers("alice", "memory:read,team:team-x")
+        f"/api/v1/memory/nodes/{node.id}", headers=_headers("alice", "memory.read,team:team-x")
     )
     assert r.status_code == 200
 
     r = await client.get(
         f"/api/v1/memory/nodes/{node.id}",
-        headers=_headers("admin", "memory:read,memory:admin"),
+        headers=_headers("admin", "memory.read,memory.admin"),
     )
     assert r.status_code == 200
 

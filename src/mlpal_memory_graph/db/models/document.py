@@ -76,6 +76,10 @@ class Chunk(Base):
     ingested_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
+    # usage evidence for retention/GC (migration 0014): has this memory EVER been
+    # served, and when last. Bumped fire-and-forget by the read path.
+    served_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    last_served_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     __table_args__ = (
         Index("ix_chunk_scope", "org_id", "scope", "scope_id"),

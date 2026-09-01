@@ -44,11 +44,11 @@ async def test_team_scope_visible_only_with_team_grant(client):
 
     member = {
         "X-Test-Org-Id": "orgA", "X-Test-User-Id": "carol",
-        "X-Test-Permissions": "memory:read,team:eng",
+        "X-Test-Permissions": "memory.read,team:eng",
     }
     outsider = {
         "X-Test-Org-Id": "orgA", "X-Test-User-Id": "dave",
-        "X-Test-Permissions": "memory:read",
+        "X-Test-Permissions": "memory.read",
     }
 
     async def names(headers):

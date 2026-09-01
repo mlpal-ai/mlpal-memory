@@ -1,0 +1,15 @@
+# x10 tasks — author real questions about YOUR org with machine-checkable
+# answers, then run both arms:
+#   python evals/x10/run_x10.py --arms baseline,memory
+# Mark `stale: true` on questions whose true answer changed over time while
+# outdated statements still outnumber current ones on disk (the trap subgroup —
+# where memory shows up most).
+tasks:
+  - id: example-build-system
+    q: What build system does repo-x use? Answer with the name.
+    answer_regex: "gradle"
+  - id: example-cost-now
+    q: What does the platform cost per day now, after the migration?
+    answer_regex: "\\$?42\\b"
+    stale: true
+    stale_regex: "\\$?90\\b"

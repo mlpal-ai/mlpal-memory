@@ -46,7 +46,7 @@ def _forward_read_headers(incoming: Mapping[str, str]) -> dict[str, str]:
     would otherwise run unscoped. On the read-only public sidecar that key is absent, so this is
     a no-op there; the check costs nothing and catches a co-located misconfiguration.
     """
-    auth = incoming.get("authorization")
+    auth = incoming.get("authorization") or incoming.get("x-api-key")
     if not auth:
         # Dev/demo fallback: when there's no caller token (e.g. a local harness MCP connection that
         # can't attach headers), read as a configured demo identity. Env-gated → no-op in prod
@@ -125,7 +125,10 @@ if _FASTMCP_AVAILABLE:
         area: pass ``workspace`` (the repo/project name) to focus on knowledge learned
         there. If the packet reports gaps, say so rather than guessing. ``as_of``
         (ISO-8601) answers from what memory knew at that instant."""
-        params: dict = {"q": query}
+        # agent_mode always: this surface serves agents by definition, and agent-mode
+        # packets suppress failed-run narrative (x3 finding 5 — models mine memory for
+        # prior-confirmation), rendering negative knowledge as one-line constraints.
+        params: dict = {"q": query, "agent_mode": "true"}
         if workspace:
             params["workspace"] = workspace
         if as_of:

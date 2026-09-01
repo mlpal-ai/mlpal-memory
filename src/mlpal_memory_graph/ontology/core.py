@@ -54,6 +54,13 @@ NODE_CLASSES: dict[str, NodeClass] = {
     "Gotcha": NodeClass(
         "Gotcha", "skos:Concept", "A landmine/failure-mode worth warning future sessions about."
     ),
+    # value-fact pair (x6/x6b/x6c: quantitative drift needs current-value semantics):
+    # a stable anchor per watched key + one node per observed value, linked by the
+    # functional HAS_VALUE edge whose supersession IS the "current value" mechanism.
+    "Metric": NodeClass("Metric", "qudt:Quantity", "A watched value's stable anchor (key)."),
+    "MetricValue": NodeClass(
+        "MetricValue", "qudt:QuantityValue", "One observed value of a watched metric."
+    ),
     "HowTo": NodeClass(
         "HowTo", "schema:HowTo", "A working procedure (commands, order, preconditions)."
     ),
@@ -87,6 +94,9 @@ EDGE_CLASSES: dict[str, EdgeClass] = {
     "APPLIES_TO": EdgeClass("APPLIES_TO", "An insight applies to a Workspace/CodeArea/entity."),
     "LEARNED_IN": EdgeClass("LEARNED_IN", "An insight was learned in a Chat/session."),
     "SUPERSEDES": EdgeClass("SUPERSEDES", "A newer insight explicitly replaces an older one."),
+    "HAS_VALUE": EdgeClass(
+        "HAS_VALUE", "A Metric's current observed value.", functional=True
+    ),
     # NOT functional: contradictions from different writers COEXIST as a contention point,
     # ranked at read time — never silently resolved (design v3 §2.4).
     "CONTRADICTS": EdgeClass("CONTRADICTS", "Two live assertions disagree (contention point)."),

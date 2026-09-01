@@ -37,6 +37,10 @@ class Node(Base):
     props: Mapped[dict] = mapped_column(JSON, default=dict)
     # embedding: pgvector(1536) on Postgres, JSON on SQLite (dialect-aware). Stamp the model +
     # dim used so a future re-embed migration never mixes embedding spaces (D2).
+    # usage evidence for retention/GC (migration 0014): has this memory EVER been
+    # served, and when last. Bumped fire-and-forget by the read path.
+    served_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    last_served_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     embedding: Mapped[list | None] = mapped_column(Embedding())
     embedding_model: Mapped[str | None] = mapped_column(String(64))
     embedding_dim: Mapped[int | None] = mapped_column(Integer)

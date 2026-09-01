@@ -130,7 +130,34 @@ def create_app() -> FastAPI:
     if ui_dir is not None:
         from fastapi.staticfiles import StaticFiles
 
-        app.mount("/ui", StaticFiles(directory=str(ui_dir), html=True), name="ui")
+        class SPAStaticFiles(StaticFiles):
+            """Unknown /ui/<path> serves index.html (the app hash-routes) instead of a
+            bare 404 — a pasted deep link should land in the app, not on an error."""
+
+            async def get_response(self, path: str, scope):
+                from starlette.exceptions import HTTPException as _StarletteHTTPException
+
+                try:
+                    response = await super().get_response(path, scope)
+                except _StarletteHTTPException as exc:  # starlette RAISES 404s
+                    if exc.status_code != 404:
+                        raise
+                    return await super().get_response("index.html", scope)
+                if response.status_code == 404:
+                    response = await super().get_response("index.html", scope)
+                return response
+
+        app.mount("/ui", SPAStaticFiles(directory=str(ui_dir), html=True), name="ui")
+
+        favicon = ui_dir / "favicon.svg"
+        if not favicon.exists():
+            favicon = ui_dir / "favicon.ico"
+        if favicon.exists():
+            from fastapi.responses import FileResponse
+
+            @app.get("/favicon.ico", include_in_schema=False)
+            async def _favicon():  # browsers request it at the root regardless of mounts
+                return FileResponse(str(favicon))
     return app
 
 

@@ -1,4 +1,13 @@
-import { Database, MessageCircleQuestion, Search as SearchIcon } from "lucide-react";
+import {
+  Database,
+  History,
+  Inbox,
+  Layers,
+  type LucideIcon,
+  MessageCircleQuestion,
+  Search as SearchIcon,
+  X,
+} from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router";
 import {
@@ -17,6 +26,8 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { type MemoryApiError, type StoreStats, getStats } from "@/lib/api";
 import { cn } from "@/lib/cn";
+import { plural } from "@/lib/format";
+import { useDismissed } from "@/lib/use-dismissed";
 
 export function Overview() {
   const [stats, setStats] = useState<StoreStats | null>(null);
@@ -64,6 +75,8 @@ export function Overview() {
           </button>
         </div>
       )}
+
+      <HowMemoryWorks />
 
       {empty ? (
         <EmptyStore />
@@ -160,7 +173,7 @@ export function Overview() {
                     <div key={w.workspace} className="flex items-center gap-2.5 px-1 py-0.5 text-sm">
                       <code className="flex-1 truncate text-xs">{w.workspace}</code>
                       <span className="text-xs tabular-nums text-muted-foreground">
-                        {w.nodes} fact{w.nodes === 1 ? "" : "s"}
+                        {plural(w.nodes, "fact")}
                       </span>
                     </div>
                   ))
@@ -170,6 +183,90 @@ export function Overview() {
           </div>
         </>
       )}
+    </div>
+  );
+}
+
+/** First-user orientation: the whole system in three steps, each linking to
+ * the page that shows it live. Dismissable and persisted. */
+function HowMemoryWorks() {
+  const [dismissed, dismiss] = useDismissed("mlpal.memory.how-it-works");
+  if (dismissed) return null;
+  return (
+    <Card>
+      <CardHeader className="flex-row items-center justify-between">
+        <CardTitle className="text-sm">How memory works</CardTitle>
+        <button
+          onClick={dismiss}
+          aria-label="Dismiss"
+          className="rounded-md p-0.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+        >
+          <X className="size-4" />
+        </button>
+      </CardHeader>
+      <CardContent>
+        <div className="grid gap-4 sm:grid-cols-3">
+          <HowStep
+            n={1}
+            icon={Inbox}
+            title="Experience flows in"
+            body="Sessions, docs and PDFs arrive through a governed pipeline — every event ledgered, curated, forgettable."
+            to="/manage"
+            linkLabel="Manage"
+          />
+          <HowStep
+            n={2}
+            icon={Layers}
+            title="Two tiers, bitemporally stamped"
+            body="Verbatim evidence plus typed facts derived from it — each stamped with when it was true and when memory learned it."
+            to="/timeline"
+            linkLabel="Timeline"
+            LinkIcon={History}
+          />
+          <HowStep
+            n={3}
+            icon={MessageCircleQuestion}
+            title="Ask any route"
+            body="A free deterministic packet, a one-call answer, or a deep search that loops retrieval — all cited, all honest about gaps."
+            to="/ask"
+            linkLabel="Ask"
+          />
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function HowStep({
+  n,
+  icon: Icon,
+  title,
+  body,
+  to,
+  linkLabel,
+  LinkIcon,
+}: {
+  n: number;
+  icon: LucideIcon;
+  title: string;
+  body: string;
+  to: string;
+  linkLabel: string;
+  LinkIcon?: LucideIcon;
+}) {
+  return (
+    <div className="flex flex-col gap-1.5 rounded-lg border border-border p-3.5">
+      <div className="flex items-center gap-2">
+        <Icon className="size-4 text-[var(--accent)]" />
+        <span className="text-sm font-semibold">
+          {n}. {title}
+        </span>
+      </div>
+      <p className="text-xs leading-relaxed text-muted-foreground">{body}</p>
+      <Link to={to} className="mt-auto inline-flex items-center gap-1 pt-1 text-xs link-accent">
+        {LinkIcon && <LinkIcon className="size-3" />}
+        {linkLabel} →
+      </Link>
     </div>
   );
 }

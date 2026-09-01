@@ -26,7 +26,7 @@ async def test_org_admin_cannot_write_global(client):
         headers={
             "X-Test-Org-Id": "orgA",
             "X-Test-User-Id": "admin-user",
-            "X-Test-Permissions": "memory:write,memory:admin",
+            "X-Test-Permissions": "memory.write,memory.admin",
         },
     )
     assert r.status_code == 403
@@ -51,7 +51,7 @@ async def test_documents_global_also_locked(client):
         json={"content": "x", "source": "test", "scope": "global", "scope_id": "global"},
         headers={
             "X-Test-Org-Id": "orgA",
-            "X-Test-Permissions": "memory:write,memory:admin",
+            "X-Test-Permissions": "memory.write,memory.admin",
         },
     )
     assert r.status_code == 403

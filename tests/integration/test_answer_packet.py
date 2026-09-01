@@ -10,7 +10,7 @@ import pytest
 H = {
     "X-Test-Org-Id": "orgA",
     "X-Test-User-Id": "alice",
-    "X-Test-Permissions": "memory:read,memory:write",
+    "X-Test-Permissions": "memory.read,memory.write",
 }
 
 
@@ -216,3 +216,112 @@ async def test_agent_mode_suppresses_failed_narrative_renders_constraints(client
     assert "## Ruled out (do not pursue)" in md
     assert "dead end" in md
     assert "Found it! Float hashing precision" not in md  # narrative fully suppressed
+
+
+@pytest.mark.asyncio
+async def test_synthesized_mode_wiring_and_empty_abstention(client, monkeypatch):
+    """x5: mode=synthesized composes FROM the packet via the LLM seam; an empty
+    packet short-circuits to the packet's abstention with ZERO model calls."""
+    from mlpal_memory_graph.services import synthesis
+
+    calls: list[str] = []
+
+    async def fake_synth(*, query, packet_markdown, model=None):
+        calls.append(query)
+        assert "memory://" in packet_markdown  # composes from the real packet
+        return "The build system is gradle [memory://chunk/x].", {"output_tokens": 12}
+
+    monkeypatch.setattr(synthesis, "synthesize_answer", fake_synth)
+
+    # empty store for this query -> abstention, no synthesis call
+    r = await client.get(
+        "/api/v1/memory/answer",
+        params={"q": "quarterly revenue of atlantis", "mode": "synthesized"},
+        headers=H,
+    )
+    assert r.json()["mode"] == "synthesized" and r.json()["synth_ms"] is None
+    assert not calls, "empty packet must not spend a model call"
+    assert "no relevant knowledge" in r.json()["markdown"].lower()
+
+    # non-empty store -> synthesized answer replaces the packet; hybrid appends it
+    now = datetime.now(UTC)
+    await _ingest_doc(client, "The build system for repo-s is gradle.", now, "notes")
+    r = await client.get(
+        "/api/v1/memory/answer",
+        params={"q": "build system for repo-s", "workspace": "repo-x",
+                "mode": "synthesized"},
+        headers=H,
+    )
+    body = r.json()
+    assert calls and body["markdown"].startswith("The build system is gradle")
+    assert body["synth_ms"] is not None
+    r = await client.get(
+        "/api/v1/memory/answer",
+        params={"q": "build system for repo-s", "workspace": "repo-x", "mode": "hybrid"},
+        headers=H,
+    )
+    md = r.json()["markdown"]
+    assert md.startswith("The build system is gradle") and "## Evidence" in md
+
+
+@pytest.mark.asyncio
+async def test_as_of_excludes_future_documents(client):
+    """x6 gap fix: a point-in-time answer must not see documents from after the
+    as-of instant (measured pre-fix: 9/12 as-of queries leaked future knowledge)."""
+    now = datetime.now(UTC)
+    await _ingest_doc(client, "The cache engine for repo-t is redis 7 without tls.",
+                      now - timedelta(days=400), "old cache notes")
+    await _ingest_doc(client, "The cache engine for repo-t is valkey 8.2, tls only.",
+                      now - timedelta(days=3), "new cache notes")
+
+    asof = (now - timedelta(days=100)).isoformat()
+    r = await client.get(
+        "/api/v1/memory/answer",
+        params={"q": "what cache engine does repo-t use", "workspace": "repo-x",
+                "as_of": asof},
+        headers=H,
+    )
+    md = r.json()["markdown"]
+    assert "redis 7" in md
+    assert "valkey" not in md, "future document leaked into a point-in-time answer"
+
+    # current view still serves the new truth first
+    r = await client.get(
+        "/api/v1/memory/answer",
+        params={"q": "what cache engine does repo-t use", "workspace": "repo-x"},
+        headers=H,
+    )
+    md = r.json()["markdown"]
+    assert md.index("valkey") < md.index("redis 7")
+
+
+@pytest.mark.asyncio
+async def test_current_value_fact_leads_packet_and_labels_stale_evidence(client):
+    """x11: the store served the current watched value while older verbatim passages
+    shouted the superseded one — and an identical reader followed the louder stale
+    evidence. A current MetricValue matching the query must LEAD the packet, and
+    evidence older than the value must carry a predates label."""
+    await _ingest_doc(
+        client,
+        "Cluster inventory: our eks cluster runs kubernetes 1.33 (eks.41), verified live.",
+        datetime.now(UTC) - timedelta(days=30),
+        "old inventory",
+    )
+    await _ingest_doc(
+        client,
+        "Post-upgrade check: the eks cluster now runs kubernetes 1.36 across all nodegroups.",
+        datetime.now(UTC) - timedelta(days=2),
+        "upgrade note",
+    )
+    r = await client.get(
+        "/api/v1/memory/answer",
+        params={"q": "what kubernetes version does the eks cluster run", "workspace": "repo-x"},
+        headers=H,
+    )
+    assert r.status_code == 200
+    md = r.json()["markdown"]
+    tldr = md.splitlines()[1]
+    assert "1.36" in tldr and "current" in tldr, tldr
+    assert "1.33" not in tldr
+    # the 30-day-old passage predates the current value and is labeled
+    assert "predates the current value" in md

@@ -1,6 +1,6 @@
 """Regression: POST /documents enforces the same write-scope gate as /episodes.
 
-Before the fix, any memory:write caller could ingest direct-tier content into
+Before the fix, any memory.write caller could ingest direct-tier content into
 TEAM/SERVICE/REPO/AGENT scopes that the episodes gate forbids.
 """
 
@@ -11,7 +11,7 @@ import pytest
 DOC = {"content": "the payments service deploys from the release branch", "source": "test"}
 
 
-def _headers(perms: str = "memory:write", user: str = "alice") -> dict:
+def _headers(perms: str = "memory.write", user: str = "alice") -> dict:
     return {
         "X-Test-Org-Id": "orgA",
         "X-Test-User-Id": user,
@@ -60,6 +60,6 @@ async def test_admin_may_ingest_into_subject_scopes(client):
     r = await client.post(
         "/api/v1/documents",
         json={**DOC, "scope": "team", "scope_id": "team-x"},
-        headers=_headers(perms="memory:write,memory:admin"),
+        headers=_headers(perms="memory.write,memory.admin"),
     )
     assert r.status_code == 202, r.text
