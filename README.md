@@ -51,6 +51,9 @@ The design and its evaluation are described in the launch paper,
 [`docs/paper/mlpal-memory-paper.pdf`](docs/paper/mlpal-memory-paper.pdf)
 (launch post: link forthcoming).
 
+New here? The step-by-step walkthrough is
+[`docs/GETTING_STARTED.md`](docs/GETTING_STARTED.md).
+
 ## Quickstart
 
 ```bash
