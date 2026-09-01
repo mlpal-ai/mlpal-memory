@@ -37,6 +37,27 @@ def _episode_scope(episode) -> ScopeRef:
 
 
 class Updater:
+    @staticmethod
+    async def _known_state_subjects(session, tenant_id: str) -> list[str]:
+        """Existing state anchors for this org — sticky subject naming (x11)."""
+        from sqlalchemy import select
+
+        from ..db.models import Node
+
+        rows = (
+            await session.execute(
+                select(Node.name)
+                .where(
+                    Node.org_id == tenant_id,
+                    Node.type == "Metric",
+                    Node.key.like("state:%"),
+                )
+                .order_by(Node.updated_at.desc())
+                .limit(80)
+            )
+        ).scalars()
+        return [n.removesuffix(" status") for n in rows]
+
     def __init__(self, llm_enabled: bool | None = None) -> None:
         self.driver = get_driver()
         self.embedder = get_embedder()
@@ -110,10 +131,22 @@ class Updater:
         # value" bitemporally. Tiered: pattern (free, deterministic) | llm (precision
         # — the pattern tier's ceiling was measured across three x6c retune rounds).
         from ..core.config import get_settings as _gs
-        from .value_facts import extract_value_specs, llm_extract_value_specs
+        from .value_facts import (
+            extract_value_specs,
+            llm_extract_state_specs,
+            llm_extract_value_specs,
+        )
 
         if _gs().value_extractor == "llm":
             v_entities, v_edges = await llm_extract_value_specs(episode.content)
+            # lifecycle state flips (x11): same watched-fact machinery, LLM tier only.
+            # Existing anchors are passed in so subject naming stays sticky across
+            # documents — fragmented keys silently break supersession.
+            s_entities, s_edges = await llm_extract_state_specs(
+                episode.content,
+                known_subjects=await self._known_state_subjects(session, tenant_id),
+            )
+            v_entities, v_edges = v_entities + s_entities, v_edges + s_edges
         else:
             v_entities, v_edges = extract_value_specs(episode.content)
         extraction.entities.extend(v_entities)

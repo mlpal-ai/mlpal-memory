@@ -246,3 +246,166 @@ def extract_value_specs(
             )
         )
     return entities, edges
+
+
+# ── lifecycle state-facts (x11) ──────────────────────────────────────────────
+# Mem0's distillation beat our retrieval on exactly one class: STATE FLIPS
+# announced as passing mentions in dense operational logs ("status.mlpal.ai
+# LIVE" inside a teardown entry). Traced causes: the truth chunk loses IDF
+# coverage to topical-but-stale documents (and a URL-carried subject tokenizes
+# as one host token, invisible to its own name), and the derived tier held ZERO
+# facts for the flip. Values had this fixed (stable key + same-key
+# supersession); categorical lifecycle states did not. This tier closes that:
+# an LLM pass, cost-gated by a lifecycle-marker regex, closed state enum,
+# verbatim-quote validation — riding the exact same Metric/MetricValue/
+# HAS_VALUE machinery, so supersession, packet lead, predates labels, and the
+# /memory/metrics history all apply unchanged.
+
+STATE_ENUM = (
+    "live", "retired", "parked", "open", "gated", "active",
+    "deprecated", "completed", "blocked", "migrated",
+)
+STATE_GATE = re.compile(
+    r"\b(live|went live|retired|parked|decommissioned|deprecated|shipped|launched|"
+    r"cut ?over|terminated|opened|open signup|gated|ungated|un-gated|completed|"
+    r"blocked|migrated|shut ?down|sunset)\b",
+    re.I,
+)
+_STATE_STOP = frozenset("the a an our public new old mlpal".split())
+
+STATE_LLM_SYSTEM = """You extract CURRENT lifecycle states of named systems/features from one document.
+Report a (subject, state) pair ONLY when the document clearly states that subject's
+CURRENT operational state. Allowed states (report nothing else):
+{states}
+Rules:
+- subject: the SHORTEST canonical lowercase name (e.g. "status page", "fc services",
+  "signup", "docs site") — NEVER a URL or hostname, never a sentence.
+- If the document narrates a change ("parked, then shipped"), report ONLY the FINAL state.
+- Skip plans, proposals, hypotheticals, and other organizations' systems.
+- quote MUST be copied verbatim from the document (it is checked; paraphrase = dropped).
+- Output STRICT JSON: {{"states": [{{"subject": "...", "state": "...", "quote": "..."}}]}}"""
+
+STATE_LLM_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "states": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "subject": {"type": "string"},
+                    "state": {"type": "string"},
+                    "quote": {"type": "string"},
+                },
+                "required": ["subject", "state", "quote"],
+                "additionalProperties": False,
+            },
+        }
+    },
+    "required": ["states"],
+    "additionalProperties": False,
+}
+
+
+def _state_key(subject: str) -> str:
+    """Stable key from a canonical subject: stopword-stripped kebab slug — the
+    same-key supersession contract ("public status page" == "status page")."""
+    words = [w for w in re.findall(r"[a-z0-9]+", subject.lower()) if w not in _STATE_STOP]
+    return "state:" + "-".join(words or ["unknown"])
+
+
+def _subject_tokens(subject: str) -> frozenset[str]:
+    return frozenset(
+        w for w in re.findall(r"[a-z0-9]+", subject.lower()) if w not in _STATE_STOP
+    )
+
+
+def canonical_subject(subject: str, known_subjects: list[str]) -> str:
+    """Snap a freshly extracted subject onto an existing anchor when they name the
+    same thing — IN CODE, deterministically. The traced alternative (offering known
+    subjects in the prompt) was erratic: the same doc yielded 4 facts, 0, 3, 0 as
+    the list varied. Rule: token-set subset either way, or Jaccard >= 0.5.
+    ("status page design" ⊃ "status page" -> merge; "fc router" vs "fc console"
+    share 1/3 -> stay distinct.)"""
+    new = _subject_tokens(subject)
+    if not new:
+        return subject
+    best, best_j = None, 0.0
+    for k in known_subjects:
+        kt = _subject_tokens(k)
+        if not kt:
+            continue
+        if new <= kt or kt <= new:
+            return k
+        j = len(new & kt) / len(new | kt)
+        if j >= 0.5 and j > best_j:
+            best, best_j = k, j
+    return best or subject
+
+
+async def llm_extract_state_specs(
+    text: str | None, known_subjects: list[str] | None = None
+) -> tuple[list[EntitySpec], list[EdgeSpec]]:
+    """One haiku-class call per document that COARSELY matches a lifecycle marker
+    (cost gate). Closed enum + verbatim-quote validation; empty on any failure
+    (there is no pattern fallback for states — silence over noise).
+
+    ``known_subjects``: existing state anchors — new subjects that name the same
+    thing are snapped onto them by ``canonical_subject`` AFTER extraction, in code.
+    The x11 backfill traces fixed this design twice: free naming fragmented keys
+    ("status page" / "status.mlpal.ai" / "status page design" — the LIVE flip never
+    superseded PARKED), and offering the known list in the prompt made extraction
+    erratic (the same doc yielded 4/0/3/0 facts as the list varied). Extraction
+    stays bare and deterministic; canonicalization is deterministic code."""
+    if not text or not STATE_GATE.search(text):
+        return [], []
+    from ..services.llm_client import get_llm_client
+
+    try:
+        out = await get_llm_client().complete_json(
+            system=STATE_LLM_SYSTEM.format(states=", ".join(STATE_ENUM)),
+            user=text[:20_000],
+            schema=STATE_LLM_SCHEMA,
+            # 1200, not 500: a teardown-day worklog legitimately flips ~10 states;
+            # at 500 the JSON truncates and complete_json degrades to {} — traced
+            # as the silent loss of the status-page LIVE flip (2026-09-01)
+            max_tokens=1200,
+        )
+    except Exception:  # noqa: BLE001
+        return [], []
+    entities: list[EntitySpec] = []
+    edges: list[EdgeSpec] = []
+    seen: set[str] = set()
+    for item in out.get("states", []):
+        if not isinstance(item, dict):
+            continue  # schema drift (bare string in the array) — skip, never crash the fold
+        subject = str(item.get("subject", "")).strip().lower()
+        state = str(item.get("state", "")).strip().lower()
+        quote = str(item.get("quote", ""))
+        if not subject or state not in STATE_ENUM or quote not in text:
+            continue
+        if "." in subject or "/" in subject or len(subject) > 60:
+            continue  # URLs/hostnames/sentences fragment keys — hard-dropped
+        subject = canonical_subject(subject, known_subjects or [])
+        key = _state_key(subject)
+        if key == "state:unknown" or key in seen:
+            continue
+        seen.add(key)
+        label = f"{subject} status"
+        display = f"{label} = {state}"
+        entities.append(EntitySpec(type="Metric", key=key, name=label))
+        entities.append(
+            EntitySpec(
+                type="MetricValue", key=f"{key}={state}", name=display,
+                props={"value": state, "unit": "state", "evidence_span": quote[:300]},
+            )
+        )
+        edges.append(
+            EdgeSpec(
+                type="HAS_VALUE",
+                src_type="Metric", src_key=key,
+                dst_type="MetricValue", dst_key=f"{key}={state}",
+                fact=display, functional=True, props={"value": state},
+            )
+        )
+    return entities, edges

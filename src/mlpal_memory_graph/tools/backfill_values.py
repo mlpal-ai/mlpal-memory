@@ -23,14 +23,40 @@ from ..core.scope import Scope, ScopeRef
 from ..db import get_session_factory
 from ..db.models import Chunk, Document
 from ..graph import get_driver
-from ..pipeline.value_facts import extract_value_specs, llm_extract_value_specs
+from ..pipeline.value_facts import (
+    extract_value_specs,
+    llm_extract_state_specs,
+    llm_extract_value_specs,
+)
 
 
-async def _backfill(org: str, user: str, workspace: str) -> None:
+async def _backfill(org: str, user: str, workspace: str, wipe: bool = False) -> None:
     factory = get_session_factory()
     driver = get_driver()
     use_llm = get_settings().value_extractor == "llm"
     async with factory() as session:
+        if wipe:
+            # Recompute semantics: re-running extraction must not ACCUMULATE — six
+            # stacked runs left 87 daily-cost edges with five conflicting "current"
+            # values open at once (x11 trace, 2026-09-01). Watched facts are fully
+            # derivable from the documents, so wipe-and-rebuild is lossless.
+            from sqlalchemy import delete as _del
+
+            from ..db.models import Edge as _E2
+            from ..db.models import Node as _N2
+
+            targets = select(_N2.id).where(
+                _N2.org_id == org,
+                _N2.type.in_(("Metric", "MetricValue")),
+                _N2.workspace == workspace,
+            )
+            await session.execute(
+                _del(_E2).where(_E2.src_id.in_(targets) | _E2.dst_id.in_(targets))
+            )
+            n = (await session.execute(
+                _del(_N2).where(_N2.id.in_(targets.scalar_subquery()))
+            )).rowcount
+            print(f"wiped {n} watched-fact nodes (org={org}, ws={workspace})")
         docs = (
             (
                 await session.execute(
@@ -43,6 +69,21 @@ async def _backfill(org: str, user: str, workspace: str) -> None:
             .all()
         )
         print(f"{len(docs)} documents in {org}/{workspace} (valid-time order)")
+        # sticky state subjects (x11): seed from existing anchors, grow as written —
+        # chronological processing + a stable name list is what keeps one subject
+        # on one key so supersession can actually fire
+        from ..db.models import Node
+
+        known: list[str] = [
+            n.removesuffix(" status")
+            for n in (
+                await session.execute(
+                    select(Node.name).where(
+                        Node.org_id == org, Node.type == "Metric", Node.key.like("state:%")
+                    )
+                )
+            ).scalars()
+        ]
         made = 0
         for doc in docs:
             chunks = (
@@ -59,6 +100,13 @@ async def _backfill(org: str, user: str, workspace: str) -> None:
             content = "\n".join(chunks)
             if use_llm:
                 ents, edges = await llm_extract_value_specs(content)
+                s_ents, s_edges = await llm_extract_state_specs(content, known_subjects=known)
+                for e in s_ents:
+                    if e.type == "Metric":
+                        name = e.name.removesuffix(" status")
+                        if name not in known:
+                            known.append(name)
+                ents, edges = ents + s_ents, edges + s_edges
             else:
                 ents, edges = extract_value_specs(content)
             if not edges:
@@ -110,8 +158,10 @@ def main() -> int:
     ap.add_argument("--org", required=True)
     ap.add_argument("--user", required=True)
     ap.add_argument("--workspace", required=True)
+    ap.add_argument("--wipe", action="store_true",
+                    help="delete this workspace's watched facts first (recompute, not accumulate)")
     args = ap.parse_args()
-    asyncio.run(_backfill(args.org, args.user, args.workspace))
+    asyncio.run(_backfill(args.org, args.user, args.workspace, wipe=args.wipe))
     return 0
 
 

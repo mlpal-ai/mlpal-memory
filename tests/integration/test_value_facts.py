@@ -179,3 +179,66 @@ async def test_llm_value_tier_grounding(monkeypatch):
         "steady state: the platform costs $28 per day."
     )
     assert any(e.key == "metric:daily-cost=28" for e in ents)  # pattern fallback
+
+
+@pytest.mark.asyncio
+async def test_llm_state_tier_lifecycle_flips(monkeypatch):
+    """x11: state flips announced as passing mentions ("status.mlpal.ai LIVE" inside
+    a teardown worklog) produced ZERO derived facts and lost retrieval to topical
+    stale docs. The state tier concentrates them: closed enum, verbatim quote,
+    stopword-stable keys ("public status page" == "status page"), silent on failure."""
+    from mlpal_memory_graph.pipeline import value_facts
+    from mlpal_memory_graph.services import llm_client as lc
+
+    text = (
+        "Teardown day. docs host terminated. Also: status.mlpal.ai LIVE "
+        "(CF + OAC S3, survives platform outages). fc services fully retired."
+    )
+
+    class Stub:
+        async def complete_json(self, **_):
+            return {"states": [
+                {"subject": "public status page", "state": "live", "quote": "status.mlpal.ai LIVE"},
+                {"subject": "the status page", "state": "live", "quote": "status.mlpal.ai LIVE"},
+                {"subject": "fc services", "state": "retired", "quote": "fc services fully retired"},
+                {"subject": "docs site", "state": "exploded", "quote": "docs host terminated"},
+                {"subject": "signup", "state": "open", "quote": "NOT IN TEXT"},
+            ]}
+
+    monkeypatch.setattr(lc, "get_llm_client", lambda: Stub())
+    ents, edges = await value_facts.llm_extract_state_specs(text)
+    keys = sorted(e.key for e in ents if "=" in e.key)
+    # dup subject merged by stable key; unknown state dropped; ungrounded quote dropped
+    assert keys == ["state:fc-services=retired", "state:status-page=live"]
+    assert len(edges) == 2 and all(e.functional for e in edges)
+
+    # cost gate: no lifecycle marker -> no model call at all
+    class Boom:
+        async def complete_json(self, **_):
+            raise AssertionError("should not be called")
+
+    monkeypatch.setattr(lc, "get_llm_client", lambda: Boom())
+    ents, _ = await value_facts.llm_extract_state_specs("We refactored the ranking code.")
+    assert ents == []
+
+    # model failure -> silence, never noise
+    class Down:
+        async def complete_json(self, **_):
+            raise RuntimeError("gateway down")
+
+    monkeypatch.setattr(lc, "get_llm_client", lambda: Down())
+    ents, _ = await value_facts.llm_extract_state_specs("The docs host was retired today.")
+    assert ents == []
+
+
+def test_canonical_subject_snapping():
+    """Deterministic code-side canonicalization (the traced prompt-side variant was
+    erratic): subset either way merges, Jaccard >= 0.5 merges, components stay apart."""
+    from mlpal_memory_graph.pipeline.value_facts import canonical_subject
+
+    known = ["status page", "fc router", "auth"]
+    assert canonical_subject("public status page", known) == "status page"
+    assert canonical_subject("status page design", known) == "status page"
+    assert canonical_subject("mlpal-auth", known) == "auth"
+    assert canonical_subject("fc console", known) == "fc console"  # 1/3 shared: distinct
+    assert canonical_subject("billing sync", known) == "billing sync"  # novel stays novel

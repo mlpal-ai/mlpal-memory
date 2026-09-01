@@ -89,13 +89,21 @@ def _leading_value_fact(query: str, facts: list, value_since: dict):
     tokens), plus the valid-from of its live HAS_VALUE edge (``value_since`` maps
     node id -> valid_at, supplied by the call site's one IN-query)."""
     qtok = _tokens(query)
+    best, best_overlap = None, 0
     for m in facts:
         n = m.node
         if n.type != "MetricValue":
             continue
-        if len(qtok & _tokens(n.name.split("=", 1)[0])) < 2:
-            continue
-        return m, _as_utc(value_since.get(n.id))
+        # anchor = the subject part; the boilerplate " status" suffix on state
+        # facts otherwise inflates overlap for the WRONG subject (x11 trace:
+        # "mlpal-docs status" outled "status page" on a status-page question)
+        anchor = n.name.split("=", 1)[0].strip()
+        anchor = anchor.removesuffix(" status")
+        overlap = len(qtok & _tokens(anchor))
+        if overlap >= 2 and overlap > best_overlap:
+            best, best_overlap = m, overlap
+    if best is not None:
+        return best, _as_utc(value_since.get(best.node.id))
     return None, None
 
 

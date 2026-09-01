@@ -15,12 +15,63 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
-async def _value_since_map(session, resolution) -> dict:
-    """valid_at of the live HAS_VALUE edge per retrieved MetricValue node —
-    build_packet renders "current since" and labels older evidence with it (x11)."""
-    from sqlalchemy import select
+async def _value_since_map(session, resolution, ctx=None, query: str | None = None, as_of=None) -> dict:
+    """valid_at of the live HAS_VALUE edge per MetricValue node in the packet —
+    build_packet renders "current since" and labels older evidence with it (x11).
 
-    from ...db.models import Edge
+    When ``ctx``/``query`` are given, this ALSO injects watched facts the fuzzy
+    node retrieval missed: a targeted anchor lookup (query tokens vs Metric anchor
+    name, >=2 overlap) pulls each matching anchor's CURRENT value through its live
+    HAS_VALUE edge and prepends it to ``resolution.nodes``. x11 trace: "status page
+    status = live" existed and answered the question but never survived the top-5
+    node cutoff against name-frequent mlpal-* nodes. Watched questions deserve a
+    keyed read, not ranking roulette. Caller-visible scopes only."""
+    from sqlalchemy import select, tuple_
+
+    from ...db.models import Edge, Node
+    from ...services.packets import _tokens
+    from ...services.resolution import MergedNode
+
+    have = {m.node.id for m in resolution.nodes}
+    # never inject into as-of reads: the live HAS_VALUE edge is TODAY's truth,
+    # and a point-in-time packet must reconstruct via edge validity instead
+    if ctx is not None and query and as_of is None:
+        qtok = _tokens(query)
+        if len(qtok) >= 2:
+            pairs = [(s.scope.value, s.scope_id) for s in resolution.trace.accessible]
+            anchors = (
+                (
+                    await session.execute(
+                        select(Node).where(
+                            Node.org_id == ctx.tenant_id,
+                            Node.type == "Metric",
+                            tuple_(Node.scope, Node.scope_id).in_(pairs) if pairs else Node.id.is_(None),
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            hits = [
+                a for a in anchors
+                if len(qtok & _tokens(a.name.removesuffix(" status"))) >= 2
+            ]
+            if hits:
+                rows = (
+                    await session.execute(
+                        select(Node, Edge.valid_at)
+                        .join(Edge, Edge.dst_id == Node.id)
+                        .where(
+                            Edge.type == "HAS_VALUE",
+                            Edge.invalid_at.is_(None),
+                            Edge.src_id.in_([a.id for a in hits]),
+                        )
+                    )
+                ).all()
+                for node, _va in rows:
+                    if node.id not in have and node.status != "superseded":
+                        resolution.nodes.insert(0, MergedNode(node=node, score=1.0))
+                        have.add(node.id)
 
     ids = [m.node.id for m in resolution.nodes if m.node.type == "MetricValue"]
     if not ids:
@@ -429,7 +480,7 @@ async def answer_memory_stream(
             md, summary = build_packet(
                 query=hop_q, resolution=res, doc_meta=meta, as_of=as_of,
                 workspace=workspace, agent_mode=agent_mode,
-                value_since=await _value_since_map(hop_session, res),
+                value_since=await _value_since_map(hop_session, res, ctx=ctx, query=hop_q, as_of=as_of),
             )
             await mark_served(
                 hop_session,
@@ -593,7 +644,7 @@ async def answer_memory(
         as_of=as_of,
         workspace=workspace,
         agent_mode=agent_mode,
-        value_since=await _value_since_map(session, res),
+        value_since=await _value_since_map(session, res, ctx=ctx, query=q, as_of=as_of),
     )
     from ...services.usage import mark_served
 
@@ -638,7 +689,7 @@ async def answer_memory(
                 md, _ = build_packet(
                     query=hop_q, resolution=hop_res, doc_meta=meta, as_of=as_of,
                     workspace=workspace, agent_mode=agent_mode,
-                    value_since=await _value_since_map(session, hop_res),
+                    value_since=await _value_since_map(session, hop_res, ctx=ctx, query=hop_q, as_of=as_of),
                 )
                 return md
 
