@@ -51,10 +51,38 @@ async def _init_db() -> None:
         log.info("db.created_all")
 
 
+async def _warm_read_path() -> None:
+    """Warm everything the first read would otherwise pay for, off the request
+    path: the lazy ONNX embedder (measured 3–19s), then one throwaway retrieval
+    against an empty tenant to prime the DB pool, statement compiles, and query
+    plans (a further ~1.1s measured after embedder-only warmup). Background
+    task: readiness is not delayed; failures are logged, never fatal."""
+    try:
+        from .services.embeddings_client import get_embedder
+
+        await get_embedder().embed_one("warmup")
+        get_logger(__name__).info("embedder.warm")
+        from .api.deps import AuthIdentity, get_retrieval
+        from .api.v1.memory import _context
+        from .db import get_session_factory
+
+        ident = AuthIdentity(
+            user_id="warmup", org_id="warmup-nonexistent-tenant", permissions=[]
+        )
+        async with get_session_factory()() as session:
+            await get_retrieval().resolve(
+                session, _context(ident), query="warmup", limit=1, expand=False
+            )
+        get_logger(__name__).info("read_path.warm")
+    except Exception as exc:  # noqa: BLE001 — warmup is best-effort, never fatal
+        get_logger(__name__).warning("warmup_failed", error=str(exc)[:200])
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
     await _init_db()
+    warmup = asyncio.create_task(_warm_read_path())
     worker = None
     if settings.updater_enabled:
         from .services.worker import MemoryUpdateWorker
@@ -64,6 +92,7 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        warmup.cancel()
         if worker is not None:
             await worker.stop()
 
