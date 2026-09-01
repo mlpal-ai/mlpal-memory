@@ -14,13 +14,32 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-# tools/rules that can change the world; matching any of these = apply-capable
-_MUTATING = re.compile(
-    r"^(Bash|Write|Edit|MultiEdit|NotebookEdit|Apply|kubectl|terraform|aws|gh|git|npm|pip|"
-    r"docker|rm|mv|cp|chmod|curl|wget|psql)(\(|$)",
-    re.I,
-)
-_READ_ONLY = re.compile(r"^(Read|Grep|Glob|LS|Search|WebFetch|WebSearch|memory_[a-z]+)(\(|$)", re.I)
+# Builtin tool capability manifest — dumped from the engine's defaultRegistry()
+# by the harness session on 2026-09-01 (ground truth; changes only when a builtin
+# is added). The authoritative apply-capable bit is readOnly == False, NOT
+# edits||executes: Kill and WebFetch are readOnly:false with neither flag
+# (process termination, network egress) and a HOP granting only those is still
+# apply-capable. Custom/MCP/plugin tools register at session runtime and are
+# invisible here -> unknown names resolve CONSERVATIVELY (apply-capable).
+BUILTIN_READ_ONLY: dict[str, bool] = {
+    "Bash": False, "BashOutput": True, "Edit": False, "ExitPlanMode": True,
+    "Glob": True, "Grep": True, "Kill": False, "List": True, "Read": True,
+    "WebFetch": False, "Write": False,
+}
+# memory's own MCP tools are read-only by contract (pinned by test in this repo)
+BUILTIN_READ_ONLY.update({"memory_answer": True, "memory_search": True, "memory_get": True})
+
+_TOOL_NAME = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_-]*)")
+
+
+def _tool_name(rule: str) -> str:
+    """'Bash(git*)' -> 'Bash'; 'Read' -> 'Read'."""
+    m = _TOOL_NAME.match(rule)
+    return m.group(1) if m else rule
+
+
+def _is_read_only(name: str) -> bool | None:
+    return BUILTIN_READ_ONLY.get(name)  # None = unknown (runtime-registered tool)
 
 
 @dataclass
@@ -34,20 +53,23 @@ class PromotionDecision:
 
 
 def is_apply_capable(hop: dict) -> bool:
+    """apply-capable <=> any referenced tool has readOnly == False, or any
+    referenced name is unknown (runtime-registered), or tools.include is []
+    (spec: [] = all tools, which includes Bash/Write). Read-only only when
+    every referenced tool resolves to readOnly == True."""
     perms = hop.get("permissions") or {}
-    allow = [str(r) for r in (perms.get("allow") or [])]
     include = [str(t) for t in ((hop.get("tools") or {}).get("include") or [])]
-    if any(_MUTATING.match(r) for r in allow):
+    allow = [str(r) for r in (perms.get("allow") or [])]
+    if not include:
+        return True  # [] = all tools
+    names = {_tool_name(t) for t in include} | {_tool_name(r) for r in allow}
+    if any(_tool_name(r) == "*" for r in allow):
         return True
-    if any(_MUTATING.match(t) for t in include):
-        return True
-    # read-only only when the allowlists are non-empty and every entry is read-only
-    if allow and all(_READ_ONLY.match(r) for r in allow):
-        return False
-    if include and all(_READ_ONLY.match(t) for t in include):
-        return False
-    # empty allowlists = all tools (spec: [] = all) -> assume apply-capable
-    return True
+    for n in names:
+        ro = _is_read_only(n)
+        if ro is None or ro is False:
+            return True
+    return False
 
 
 def decide_promotion(hop: dict, verdict: dict) -> PromotionDecision:

@@ -83,12 +83,22 @@ def test_unversioned_artifact_refused(tmp_path):
         assert "mlpal/hop-v1" in str(e)
 
 
-def test_apply_capable_heuristic_is_conservative():
-    assert is_apply_capable({}) is True                                   # [] = all tools
-    assert is_apply_capable({"permissions": {"allow": ["Read", "Grep"]}}) is False
-    assert is_apply_capable({"permissions": {"allow": ["Read", "Bash(git:*)"]}}) is True
-    assert is_apply_capable({"tools": {"include": ["memory_answer", "Read"]}}) is False
-    assert is_apply_capable({"tools": {"include": ["kubectl"]}}) is True
+def test_apply_capable_resolves_engine_manifest_conservatively():
+    # [] = all tools (spec) -> apply-capable regardless of allow rules
+    assert is_apply_capable({}) is True
+    assert is_apply_capable({"permissions": {"allow": ["Read"]}}) is True
+    # every referenced tool readOnly:true -> read-only
+    assert is_apply_capable({"tools": {"include": ["Read", "Grep", "memory_answer"]}}) is False
+    assert is_apply_capable({"tools": {"include": ["Read"]}, "permissions": {"allow": ["Grep", "Glob"]}}) is False
+    # the readOnly bit is the truth, NOT edits||executes: Kill / WebFetch are side-effecting
+    assert is_apply_capable({"tools": {"include": ["Read", "Kill"]}}) is True
+    assert is_apply_capable({"tools": {"include": ["WebFetch"]}}) is True
+    # rule syntax Tool(pattern) resolves by the token before the paren
+    assert is_apply_capable({"tools": {"include": ["Read"]}, "permissions": {"allow": ["Bash(git:*)"]}}) is True
+    # unknown (runtime-registered custom/MCP/plugin) -> conservative
+    assert is_apply_capable({"tools": {"include": ["Read", "my_plugin_tool"]}}) is True
+    # wildcard allow -> apply-capable
+    assert is_apply_capable({"tools": {"include": ["Read"]}, "permissions": {"allow": ["*"]}}) is True
 
 
 def test_promotion_gate_tuner_owns_blast_radius():
@@ -96,7 +106,7 @@ def test_promotion_gate_tuner_owns_blast_radius():
     hop_auto = {**HOP, "tuning": {**HOP["tuning"], "promote": "auto"}}
     d = decide_promotion(hop_auto, accepted)
     assert d.allowed and d.mode == "human" and "apply-capable" in d.reason
-    readonly = {**hop_auto, "permissions": {"allow": ["Read", "Grep", "memory_answer"]}}
+    readonly = {**hop_auto, "tools": {"include": ["Read", "Grep", "memory_answer"]}}
     assert decide_promotion(readonly, accepted).mode == "auto"
     # a rejected verdict never promotes, whatever the mode says
     assert decide_promotion(readonly, {"disposition": "rejected", "reason": "gate"}).allowed is False
