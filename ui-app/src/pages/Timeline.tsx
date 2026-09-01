@@ -111,7 +111,11 @@ export function Timeline() {
 
 // ── §2 memory formation ─────────────────────────────────────────────────────
 
-/** Documents grouped by valid-time day, oldest first — the corpus forming. */
+/** Documents grouped by valid-time day, oldest first — the corpus forming.
+ * Progressive disclosure (founder UX pass 2026-09-01: "we are printing all the
+ * information — too much to consume at once"): the overview is a clickable
+ * activity strip, one bar per day; a day's documents render only when that day
+ * is selected. Small corpora (few days) keep the plain rail, collapsed. */
 function FormationTimeline({
   docs,
   onSelect,
@@ -119,6 +123,7 @@ function FormationTimeline({
   docs: DocumentOut[] | null;
   onSelect: (id: string) => void;
 }) {
+  const [openDay, setOpenDay] = useState<string | null>(null);
   const groups = useMemo(() => {
     const byDay = new Map<string, DocumentOut[]>();
     for (const d of docs ?? []) {
@@ -127,11 +132,22 @@ function FormationTimeline({
     }
     return [...byDay.entries()].sort(([a], [b]) => a.localeCompare(b));
   }, [docs]);
+  const maxDocs = useMemo(
+    () => Math.max(1, ...groups.map(([, g]) => g.length)),
+    [groups],
+  );
+  const openDocs = groups.find(([day]) => day === openDay)?.[1];
 
   return (
     <Card>
-      <CardHeader>
+      <CardHeader className="flex flex-row items-baseline justify-between">
         <CardTitle className="text-sm">Memory formation</CardTitle>
+        {docs !== null && groups.length > 0 && (
+          <span className="text-[11px] text-muted-foreground">
+            {plural(docs.length, "doc")} over {plural(groups.length, "active day")} ·{" "}
+            {groups[0][0]} → {groups[groups.length - 1][0]}
+          </span>
+        )}
       </CardHeader>
       <CardContent>
         {docs === null ? (
@@ -141,21 +157,46 @@ function FormationTimeline({
             No documents in this workspace yet — ingest something and its formation appears here.
           </p>
         ) : (
-          <ol className="relative flex flex-col gap-4 border-l border-border pl-5">
-            {groups.map(([day, dayDocs]) => (
-              <li key={day} className="relative">
-                <span
-                  aria-hidden
-                  className="absolute -left-[23px] top-1.5 size-2 rounded-full bg-[var(--accent)]"
-                />
-                <div className="flex items-baseline gap-2">
-                  <span className="font-mono text-xs font-semibold tabular-nums">{day}</span>
+          <div className="flex flex-col gap-3">
+            <div className="flex items-end gap-[3px] overflow-x-auto pb-1" role="listbox" aria-label="Activity by day">
+              {groups.map(([day, dayDocs]) => (
+                <button
+                  key={day}
+                  onClick={() => setOpenDay(openDay === day ? null : day)}
+                  title={`${day} — ${plural(dayDocs.length, "doc")}`}
+                  aria-selected={openDay === day}
+                  className="group flex shrink-0 flex-col items-center gap-1"
+                >
+                  <span
+                    className={cn(
+                      "w-3.5 rounded-sm transition-colors",
+                      openDay === day
+                        ? "bg-[var(--accent)]"
+                        : "bg-[var(--accent)]/35 group-hover:bg-[var(--accent)]/70",
+                    )}
+                    style={{ height: `${8 + (dayDocs.length / maxDocs) * 48}px` }}
+                  />
+                  <span
+                    className={cn(
+                      "font-mono text-[9px] tabular-nums",
+                      openDay === day ? "text-foreground" : "text-muted-foreground",
+                    )}
+                  >
+                    {day.slice(5)}
+                  </span>
+                </button>
+              ))}
+            </div>
+            {openDocs ? (
+              <div className="rounded-md border border-border p-3">
+                <div className="mb-2 flex items-baseline gap-2">
+                  <span className="font-mono text-xs font-semibold tabular-nums">{openDay}</span>
                   <span className="text-[11px] text-muted-foreground">
-                    {plural(dayDocs.length, "doc")}
+                    {plural(openDocs.length, "doc")} — click one for its content
                   </span>
                 </div>
-                <div className="mt-1.5 flex flex-wrap gap-1.5">
-                  {dayDocs.map((d) => (
+                <div className="flex flex-wrap gap-1.5">
+                  {openDocs.map((d) => (
                     <button
                       key={d.id}
                       onClick={() => onSelect(d.id)}
@@ -172,9 +213,13 @@ function FormationTimeline({
                     </button>
                   ))}
                 </div>
-              </li>
-            ))}
-          </ol>
+              </div>
+            ) : (
+              <p className="text-[11px] text-muted-foreground">
+                Each bar is one day of ingested knowledge — click a day to see its documents.
+              </p>
+            )}
+          </div>
         )}
       </CardContent>
     </Card>
@@ -240,22 +285,52 @@ function toSegments(values: MetricValueOut[]): Segment[] {
   });
 }
 
+const WATCHED_PREVIEW = 5;
+
+/** Watched values, most-changed first: the metrics with real supersession
+ * history ARE the page's story; dozens of one-value rows are inventory, not
+ * story, so they stay behind "show all" (founder UX pass 2026-09-01). */
 function WatchedValues({ metrics }: { metrics: MetricHistoryOut[] | null }) {
+  const [showAll, setShowAll] = useState(false);
+  const sorted = useMemo(
+    () => [...(metrics ?? [])].sort((a, b) => b.values.length - a.values.length),
+    [metrics],
+  );
+  const visible = showAll ? sorted : sorted.slice(0, WATCHED_PREVIEW);
+  const hidden = sorted.length - WATCHED_PREVIEW;
+
   return (
     <Card>
-      <CardHeader>
+      <CardHeader className="flex flex-row items-baseline justify-between">
         <CardTitle className="text-sm">Watched values</CardTitle>
+        {sorted.length > 0 && (
+          <span className="text-[11px] text-muted-foreground">
+            {plural(sorted.length, "tracked value")} · most-changed first
+          </span>
+        )}
       </CardHeader>
       <CardContent className="flex flex-col gap-6">
         {metrics === null ? (
           <p className="text-sm text-muted-foreground">Loading…</p>
-        ) : metrics.length === 0 ? (
+        ) : sorted.length === 0 ? (
           <p className="text-sm text-muted-foreground">
             No watched metrics in this workspace yet. When memory observes a value change —
-            a cost, a version — its whole history lands here.
+            a cost, a version, a launch — its whole history lands here.
           </p>
         ) : (
-          metrics.map((m) => <MetricBar key={m.key} metric={m} />)
+          <>
+            {visible.map((m) => (
+              <MetricBar key={m.key} metric={m} />
+            ))}
+            {hidden > 0 && (
+              <button
+                onClick={() => setShowAll((v) => !v)}
+                className="self-start rounded-md border border-border px-2.5 py-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+              >
+                {showAll ? "Show fewer" : `Show all ${sorted.length} watched values`}
+              </button>
+            )}
+          </>
         )}
       </CardContent>
     </Card>
