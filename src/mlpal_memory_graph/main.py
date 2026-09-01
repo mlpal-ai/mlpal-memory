@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from . import __version__
-from .api.v1 import documents, episodes, governance, memory, ontology, ops
+from .api.v1 import documents, episodes, governance, memory, ontology, ops, telemetry
 from .core.config import get_settings
 from .core.logging import get_logger, setup_logging
 from .db import get_engine
@@ -143,6 +143,7 @@ def create_app() -> FastAPI:
     app.include_router(governance.router, prefix="/api/v1")
     app.include_router(ontology.router, prefix="/api/v1")
     app.include_router(ops.router, prefix="/api/v1")
+    app.include_router(telemetry.router, prefix="/api/v1")
 
     # Memory explorer UI (static, read-only; ships with the service). /ui → index.html.
     # Prefer the built Vite app (ui-app/dist); fall back to the legacy static ui/ so

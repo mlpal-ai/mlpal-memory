@@ -23,6 +23,8 @@ D11.1 rows lack the new fields; the distiller reads them as ABSENT, never zero.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from ...core.logging import get_logger
 from ..envelope import Actor, EpisodeEnvelope
 
@@ -49,6 +51,18 @@ class TelemetryContractError(ValueError):
 def _require(cond: bool, msg: str) -> None:
     if not cond:
         raise TelemetryContractError(msg)
+
+
+def _occurred_at(value) -> datetime:
+    """Emitters send ISO-8601 (yodex: '...Z'); the ORM needs an aware datetime.
+    A malformed timestamp is a contract violation, not something to guess."""
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=UTC)
+    try:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise TelemetryContractError(f"occurred_at is not ISO-8601: {value!r}") from exc
+    return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
 
 
 def _validate_d112_checks(checks: dict) -> dict:
@@ -166,7 +180,7 @@ def normalize_run_outcome(event: dict, *, user_id: str) -> EpisodeEnvelope:
     if event.get("event_id"):
         env.event_id = str(event["event_id"])
     if event.get("occurred_at"):
-        env.occurred_at = event["occurred_at"]
+        env.occurred_at = _occurred_at(event["occurred_at"])
     return env
 
 
@@ -211,5 +225,5 @@ def normalize_ledger_entry(event: dict, *, user_id: str) -> EpisodeEnvelope:
     if event.get("event_id"):
         env.event_id = str(event["event_id"])
     if event.get("occurred_at"):
-        env.occurred_at = event["occurred_at"]
+        env.occurred_at = _occurred_at(event["occurred_at"])
     return env

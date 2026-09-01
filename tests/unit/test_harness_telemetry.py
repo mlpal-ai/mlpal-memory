@@ -234,3 +234,15 @@ def test_d111_events_still_normalize_unchanged():
     assert env.payload["self_check_fired"] is True
     assert "contract" not in env.payload
     assert "failure_class" not in env.payload  # absent, never zero/null-filled
+
+
+def test_occurred_at_parsed_to_aware_datetime_and_malformed_rejected():
+    from datetime import UTC
+
+    env = normalize_run_outcome(_d112_event(), user_id="svc")
+    assert env.occurred_at.tzinfo is not None
+    assert env.occurred_at.astimezone(UTC).isoformat().startswith("2026-09-01T00:00:00")
+    bad = _d112_event()
+    bad["occurred_at"] = "yesterday-ish"
+    with pytest.raises(TelemetryContractError, match="ISO-8601"):
+        normalize_run_outcome(bad, user_id="svc")
