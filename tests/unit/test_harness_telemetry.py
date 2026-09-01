@@ -101,3 +101,136 @@ def test_ledger_entry_normalizes():
     assert env.payload["to_version"] == "1.3.0"
     assert env.payload["eval"]["eval_run_id"] == "er_123"
     assert env.content is None
+
+
+# ── D11.2 acceptance (landed 2026-09-01: engine mlpal-harness@0df42fb, spec
+# mlpal-ai/hop@ace4cfc §6.3). These are the tests the emitter side runs a real
+# event through end-to-end. ───────────────────────────────────────────────────
+
+def _d112_event(**payload_overrides):
+    payload = {
+        "hop": {"name": "tuned-coding", "version": "1.4.2"},
+        "repo": "mlpal-backend",
+        "model": "claude-haiku-4-5-20251001",
+        "tier": "cheap",
+        "task_type": "bugfix",
+        "run_result": "success",
+        "failure_class": None,
+        "checks": {
+            "self_check": {"fired": True},
+            "anti_churn": {"fired": False},
+            "observe": {"ran": True, "passed": True},
+            "agent": {"verdict": "PASS"},
+        },
+        "tokens": {"input": 100, "output": 40, "cache_read_input": 0, "cache_creation_input": 0},
+        "wall_ms": 8421,
+        "turns": 3,
+    }
+    payload.update(payload_overrides)
+    return {
+        "contract": "d11.2",
+        "action_type": "run.completed",
+        "scope_id": "mlpal-backend",
+        "occurred_at": "2026-09-01T00:00:00Z",
+        "payload": payload,
+    }
+
+
+def test_d112_full_event_normalizes():
+    env = normalize_run_outcome(_d112_event(), user_id="svc")
+    p = env.payload
+    assert p["contract"] == "d11.2"
+    assert p["wall_ms"] == 8421 and "wall_s" not in p
+    assert p["failure_class"] is None
+    assert p["tier"] == "cheap"
+    assert p["checks"]["observe"] == {"ran": True, "passed": True}
+    assert p["checks"]["agent"]["verdict"] == "PASS"
+    assert "self_check_fired" not in p  # legacy loose bools are D11.1-only
+    assert env.content is None  # content-free by construction
+
+
+def test_d112_failure_class_invariant():
+    # null IFF success — both directions rejected
+    with pytest.raises(TelemetryContractError, match="failure_class"):
+        normalize_run_outcome(
+            _d112_event(run_result="success", failure_class="other"), user_id="svc")
+    with pytest.raises(TelemetryContractError, match="failure_class"):
+        normalize_run_outcome(
+            _d112_event(run_result="error", failure_class=None), user_id="svc")
+    # outside the frozen vocab: rejected, never coerced to a near bucket
+    with pytest.raises(TelemetryContractError, match="vocab"):
+        normalize_run_outcome(
+            _d112_event(run_result="error", failure_class="mystery"), user_id="svc")
+    # "other" is the honest catch-all and is accepted
+    env = normalize_run_outcome(
+        _d112_event(run_result="error", failure_class="other"), user_id="svc")
+    assert env.payload["failure_class"] == "other"
+    # a field simply missing (vs explicit null) is rejected
+    ev = _d112_event()
+    del ev["payload"]["failure_class"]
+    with pytest.raises(TelemetryContractError, match="failure_class"):
+        normalize_run_outcome(ev, user_id="svc")
+
+
+def test_d112_tier_omitted_is_absent_not_empty():
+    ev = _d112_event()
+    del ev["payload"]["tier"]
+    env = normalize_run_outcome(ev, user_id="svc")
+    assert "tier" not in env.payload
+    with pytest.raises(TelemetryContractError, match="tier"):
+        normalize_run_outcome(_d112_event(tier=""), user_id="svc")
+
+
+def test_d112_wall_s_rejected():
+    """Silent unit drift inside one contract version is the failure class the
+    D11.1→D11.2 bump exists to kill — wall_s under d11.2 is a hard error."""
+    ev = _d112_event()
+    ev["payload"]["wall_s"] = 8
+    with pytest.raises(TelemetryContractError, match="wall_s"):
+        normalize_run_outcome(ev, user_id="svc")
+    ev2 = _d112_event()
+    del ev2["payload"]["wall_ms"]
+    with pytest.raises(TelemetryContractError, match="wall_ms"):
+        normalize_run_outcome(ev2, user_id="svc")
+
+
+def test_d112_verdict_lives_in_checks_agent_and_verifier_optional():
+    """yodex leaves the legacy verifier{} unset (no double emit; it writes no
+    findings to memory://). Null agent verdict is valid (no agent check ran)."""
+    env = normalize_run_outcome(
+        _d112_event(checks={
+            "self_check": {"fired": False},
+            "anti_churn": {"fired": False},
+            "observe": {"ran": False, "passed": False},
+            "agent": {"verdict": None},
+        }),
+        user_id="svc",
+    )
+    assert "verifier" not in env.payload
+    assert env.payload["checks"]["agent"]["verdict"] is None
+    with pytest.raises(TelemetryContractError, match="checks"):
+        normalize_run_outcome(_d112_event(checks={}), user_id="svc")
+
+
+def test_d111_events_still_normalize_unchanged():
+    """Dual-version ingest: D11.1 events (no contract discriminator) keep the
+    legacy shape — wall_s, loose bools, no failure_class/tier/checks."""
+    env = normalize_run_outcome(
+        {
+            "action_type": "run.completed",
+            "scope_id": "repo-x",
+            "payload": {
+                "hop": {"name": "coding", "version": "1.0"},
+                "run_result": "success",
+                "self_check_fired": True,
+                "tokens": {"input": 1, "output": 1},
+                "wall_s": 9,
+                "turns": 2,
+            },
+        },
+        user_id="svc",
+    )
+    assert env.payload["wall_s"] == 9
+    assert env.payload["self_check_fired"] is True
+    assert "contract" not in env.payload
+    assert "failure_class" not in env.payload  # absent, never zero/null-filled
