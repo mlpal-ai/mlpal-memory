@@ -156,8 +156,11 @@ def distill_runs(episodes: list[dict]) -> tuple[list[EntitySpec], list[EdgeSpec]
             f"anti_churn fired in {s.anti_churn_fired} of {s.runs} {task} runs",
         )
 
-    # routing facts: per-tier resolve rate + median output tokens (comparison
-    # across tiers is the PROPOSER's job; the distiller states each tier plainly)
+    # routing facts: per-tier COMPLETION rate + median output tokens. run_result ==
+    # success means the loop finished without error/stall — it is NOT graded
+    # correctness (telemetry is content-free; correctness lives in the eval/bench
+    # results and is paired with these facts at analysis time, never inferred
+    # here). Comparison across tiers is the PROPOSER's job.
     for (hop, task, tier), t in sorted(by_tier.items()):
         if t.runs < MIN_RUNS:
             continue
@@ -165,7 +168,8 @@ def distill_runs(episodes: list[dict]) -> tuple[list[EntitySpec], list[EdgeSpec]
         emit(
             f"hop:{hop}|route|{task}|{tier}", f"{hop} {tier} tier ({task})",
             f"{t.successes}/{t.runs} at {med} out-tokens",
-            f"tier {tier}: {t.successes}/{t.runs} {task} runs resolved, median {med} output tokens",
+            f"tier {tier}: {t.successes}/{t.runs} {task} runs completed without error/stall "
+            f"(NOT graded correctness), median {med} output tokens",
         )
 
     # regression facts: failure-class incidence per HOP version — the proposer

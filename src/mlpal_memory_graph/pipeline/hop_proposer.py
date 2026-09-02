@@ -163,8 +163,10 @@ def propose(facts: list[Fact], tier_order: tuple[str, ...] = DEFAULT_TIER_ORDER)
                 evidence=[f.citation],
             ))
 
-    # routing: per (hop, task), if a cheaper tier resolves within the margin of the
-    # best tier, route the class down. Requires both tiers in tier_order; else silence.
+    # routing: per (hop, task), if a cheaper tier COMPLETES within the margin of the
+    # best tier, propose routing the class down. Completion (run_result) is not
+    # graded correctness — the proposal says so and the golden suite is what
+    # decides. Requires both tiers in tier_order; else silence.
     by_task: dict[tuple[str, str], dict[str, Fact]] = {}
     for f in by_kind["route"]:
         if len(f.parts) < 4:
@@ -184,11 +186,12 @@ def propose(facts: list[Fact], tier_order: tuple[str, ...] = DEFAULT_TIER_ORDER)
                 out.append(Proposal(
                     hop=hop, kind="route", knob="",   # no routing.tier field exists in hop-v1
                     change={"from": best, "to": t, "scope_note": f"class {task}"},
-                    rationale=(f"tier {t} resolves {task} at {tiers[t].value} vs "
-                               f"{best} at {tiers[best].value} ({gap_pp:.1f}pp gap)"),
-                    predicted="same resolve rate at the cheaper tier's price",
-                    risk="resolve-rate parity measured on the observed mix only; "
-                         "frontier golden must stay green",
+                    rationale=(f"tier {t} completes {task} at {tiers[t].value} vs "
+                               f"{best} at {tiers[best].value} ({gap_pp:.1f}pp gap); "
+                               "completion is not graded correctness"),
+                    predicted="same completion rate at the cheaper tier's price; correctness unknown until evaluated",
+                    risk="completion parity is NOT correctness parity (content-free telemetry); "
+                         "the golden suite decides, never this fact",
                     evidence=[tiers[t].citation, tiers[best].citation],
                 ))
                 break  # cheapest tier within margin wins; one proposal per class

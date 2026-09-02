@@ -35,6 +35,7 @@ def test_routing_proposal_cheaper_tier_within_margin():
     assert len(ps) == 1 and ps[0].kind == "route"
     assert ps[0].change["from"] == "frontier" and ps[0].change["to"] == "cheap"
     assert ps[0].knob == ""  # no routing.tier field exists — classify() will say so
+    assert "not graded correctness" in ps[0].rationale  # completion != correctness, stated
     assert set(ps[0].evidence) == {"memory://node/rc", "memory://node/rf"}
     # beyond the margin: silence
     facts[1] = _f("hop:coding|route|bugfix|cheap", "20/30 at 100 out-tokens", nid="rc")
