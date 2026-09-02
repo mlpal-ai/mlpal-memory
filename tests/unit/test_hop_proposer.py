@@ -111,3 +111,14 @@ def test_firing_rate_rules_have_thresholds_and_direction():
 def test_unclassified_without_a_surface():
     ps = propose([_f("hop:c|stall|t", "9/30")])
     assert classify(ps, None, None)[0].applicability == "unclassified"
+
+
+def test_routing_tie_surfaces_cheaper_tier():
+    """x12 A10: equal completion rates must still yield the route proposal
+    (classified later as no_declared_knob on joint-memx) — never silence."""
+    facts = [
+        _f("hop:jm|route|jm|cheap", "32/32 at 6832 out-tokens", nid="c"),
+        _f("hop:jm|route|jm|frontier", "32/32 at 5936 out-tokens", nid="f"),
+    ]
+    ps = propose(facts)
+    assert len(ps) == 1 and ps[0].change == {"from": "frontier", "to": "cheap", "scope_note": "class jm"}

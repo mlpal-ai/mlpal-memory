@@ -177,7 +177,11 @@ def propose(facts: list[Fact], tier_order: tuple[str, ...] = DEFAULT_TIER_ORDER)
         known = [t for t in tiers if t in rank and tiers[t].rate is not None]
         if len(known) < 2:
             continue
-        best = max(known, key=lambda t: tiers[t].rate)
+        # tie-break toward the MOST EXPENSIVE tier: when a cheaper tier matches the
+        # best rate exactly, the proposal must surface (x12: both tiers 32/32 and
+        # the cheap tier was picked as "best", so the route finding vanished
+        # instead of landing in the applicability table as no_declared_knob)
+        best = max(known, key=lambda t: (tiers[t].rate, rank[t]))
         for t in sorted(known, key=lambda t: rank[t]):
             if rank[t] >= rank[best]:
                 break

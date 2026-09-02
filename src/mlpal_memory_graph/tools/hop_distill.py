@@ -99,7 +99,7 @@ async def _distill(
                 )
                 await session.execute(_del(_N).where(_N.id.in_(targets.scalar_subquery())))
             print(f"wiped watched facts for hop workspaces: {hops_touched}")
-        scope = ScopeRef(Scope.ORG, None)
+        scope = ScopeRef(Scope.ORG, org)  # org scope is keyed by the org id
         node_map = {}
         for ent in ents:
             node = await driver.upsert_node(
