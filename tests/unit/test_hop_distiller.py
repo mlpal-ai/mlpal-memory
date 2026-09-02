@@ -82,6 +82,8 @@ def test_routing_fact_per_tier_with_median_tokens():
     assert "hop:coding|route|bugfix|frontier" not in keys  # floor per tier
     v = next(e for e in ents if e.key.startswith("hop:coding|route|bugfix|cheap="))
     assert v.props["value"] == f"{MIN_RUNS}/{MIN_RUNS} at 100 out-tokens"
+    # per-tier check firing is DESCRIPTIVE evidence (A8), never a rule input
+    assert "self_check 0/30" in v.props["evidence_span"] and "agent ran 0/30" in v.props["evidence_span"]
 
 
 def test_regression_fact_per_version_failure_class():

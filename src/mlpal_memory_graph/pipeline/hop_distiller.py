@@ -105,6 +105,12 @@ def distill_runs(episodes: list[dict]) -> tuple[list[EntitySpec], list[EdgeSpec]
             if p["run_result"] == "success":
                 t.successes += 1
             t.out_tokens.append(int((p.get("tokens") or {}).get("output", 0)))
+            if (checks.get("self_check") or {}).get("fired"):
+                t.self_check_fired += 1
+            if (checks.get("anti_churn") or {}).get("fired"):
+                t.anti_churn_fired += 1
+            if verdict is not None:
+                t.agent_ran += 1
 
         version = p["hop"]["version"]
         runs_by_version[(hop, version)] += 1
@@ -169,7 +175,9 @@ def distill_runs(episodes: list[dict]) -> tuple[list[EntitySpec], list[EdgeSpec]
             f"hop:{hop}|route|{task}|{tier}", f"{hop} {tier} tier ({task})",
             f"{t.successes}/{t.runs} at {med} out-tokens",
             f"tier {tier}: {t.successes}/{t.runs} {task} runs completed without error/stall "
-            f"(NOT graded correctness), median {med} output tokens",
+            f"(NOT graded correctness), median {med} output tokens; checks fired: "
+            f"self_check {t.self_check_fired}/{t.runs}, anti_churn {t.anti_churn_fired}/{t.runs}, "
+            f"agent ran {t.agent_ran}/{t.runs} (descriptive, x12 A8)",
         )
 
     # regression facts: failure-class incidence per HOP version — the proposer
