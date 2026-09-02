@@ -23,7 +23,7 @@ from sqlalchemy import select
 
 from ..db import get_session_factory
 from ..db.models import Edge, Node
-from ..pipeline.hop_proposer import DEFAULT_TIER_ORDER, Fact, propose
+from ..pipeline.hop_proposer import DEFAULT_TIER_ORDER, Fact, classify, propose
 
 
 async def _current_facts(session, org: str, hop: str) -> list[Fact]:
@@ -47,11 +47,28 @@ async def _current_facts(session, org: str, hop: str) -> list[Fact]:
     return facts
 
 
-async def _run(org: str, hop: str, tier_order: tuple[str, ...], out: str | None) -> None:
+def _parse_tunable(spec: str | None) -> dict[str, tuple[float, float]] | None:
+    """'verification.selfCheck.minEdits=1:10,routing.escalation.patience=1:4'"""
+    if not spec:
+        return None
+    out: dict[str, tuple[float, float]] = {}
+    for item in spec.split(","):
+        path, _, rng = item.strip().partition("=")
+        lo, _, hi = rng.partition(":")
+        out[path] = (float(lo or "-inf"), float(hi or "inf"))
+    return out
+
+
+async def _run(org: str, hop: str, tier_order: tuple[str, ...], out: str | None,
+               tunable: str | None = None, locked: str | None = None) -> None:
     async with get_session_factory()() as session:
         facts = await _current_facts(session, org, hop)
         print(f"{len(facts)} current distilled facts for hop={hop}")
-        proposals = propose(facts, tier_order=tier_order)
+        proposals = classify(
+            propose(facts, tier_order=tier_order),
+            _parse_tunable(tunable),
+            set(locked.split(",")) if locked else None,
+        )
         # citation enforcement: every evidence id must be one we actually read
         readable = {f.citation for f in facts}
         kept, dropped = [], 0
@@ -60,8 +77,12 @@ async def _run(org: str, hop: str, tier_order: tuple[str, ...], out: str | None)
                 kept.append(p)
             else:
                 dropped += 1
+        by_app: dict[str, int] = {}
+        for p in kept:
+            by_app[p.applicability] = by_app.get(p.applicability, 0) + 1
         doc = {
             "hop": hop, "org": org, "proposals": [p.as_dict() for p in kept],
+            "applicability_summary": by_app,
             "dropped_unresolvable_citations": dropped,
             "note": "memory proposes, evals dispose — nothing here is promoted; "
                     "run `hop eval` on each candidate before any merge",
@@ -82,8 +103,12 @@ def main() -> int:
     ap.add_argument("--tier-order", default=",".join(DEFAULT_TIER_ORDER),
                     help="cheapest first")
     ap.add_argument("--out", default=None)
+    ap.add_argument("--tunable", default=None,
+                    help="effective tunable surface: path=min:max,... (from the HOP loader)")
+    ap.add_argument("--locked", default=None, help="locked dot-paths, comma-separated")
     args = ap.parse_args()
-    asyncio.run(_run(args.org, args.hop, tuple(args.tier_order.split(",")), args.out))
+    asyncio.run(_run(args.org, args.hop, tuple(args.tier_order.split(",")), args.out,
+                     tunable=args.tunable, locked=args.locked))
     return 0
 
 

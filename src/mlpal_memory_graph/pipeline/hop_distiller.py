@@ -33,6 +33,8 @@ class RunStats:
     stalls: int = 0                       # failure_class == step_budget_stall
     observe_ran: int = 0
     observe_caught: int = 0               # observe ran and did NOT pass
+    self_check_fired: int = 0
+    anti_churn_fired: int = 0
     agent_ran: int = 0
     agent_caught: int = 0                 # verdict == FAIL
     out_tokens: list[int] = field(default_factory=list)
@@ -80,6 +82,10 @@ def distill_runs(episodes: list[dict]) -> tuple[list[EntitySpec], list[EdgeSpec]
         if p.get("failure_class") == "step_budget_stall":
             s.stalls += 1
         checks = p.get("checks") or {}
+        if (checks.get("self_check") or {}).get("fired"):
+            s.self_check_fired += 1
+        if (checks.get("anti_churn") or {}).get("fired"):
+            s.anti_churn_fired += 1
         obs = checks.get("observe") or {}
         if obs.get("ran"):
             s.observe_ran += 1
@@ -136,6 +142,19 @@ def distill_runs(episodes: list[dict]) -> tuple[list[EntitySpec], list[EdgeSpec]
                 f"0/{s.agent_ran}",
                 f"agent check ran {s.agent_ran} times on {task}, FAILed 0",
             )
+        # firing-rate facts for the intervention checks (content-free: we can see
+        # THAT they fired, never why) — these map to the verification knobs most
+        # HOPs actually declare tunable (selfCheck.minEdits, antiChurn.threshold)
+        emit(
+            f"hop:{hop}|fired-self-check|{task}", f"{hop} self-check firing ({task})",
+            f"{s.self_check_fired}/{s.runs}",
+            f"self_check fired in {s.self_check_fired} of {s.runs} {task} runs",
+        )
+        emit(
+            f"hop:{hop}|fired-anti-churn|{task}", f"{hop} anti-churn firing ({task})",
+            f"{s.anti_churn_fired}/{s.runs}",
+            f"anti_churn fired in {s.anti_churn_fired} of {s.runs} {task} runs",
+        )
 
     # routing facts: per-tier resolve rate + median output tokens (comparison
     # across tiers is the PROPOSER's job; the distiller states each tier plainly)

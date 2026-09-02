@@ -19,6 +19,8 @@ import re
 from dataclasses import dataclass, field
 
 STALL_RATE_MIN = 0.20      # >=20% step-budget stalls on a class -> budget proposal
+FIRED_RATE_HIGH = 0.50     # an intervention check firing in >=50% of runs -> loosen its knob
+FIRED_RATE_LOW = 0.05      # firing in <=5% of runs -> tighten (it is not doing work)
 ROUTE_MARGIN_PP = 5.0      # cheaper tier within 5pp of best tier -> routing proposal
 REGRESSION_RATE_MIN = 0.10 # >=10% of a version's runs in one failure class -> flag
 DEFAULT_TIER_ORDER = ("cheap", "balanced", "frontier")  # cheapest first
@@ -58,26 +60,65 @@ class Fact:
 @dataclass
 class Proposal:
     hop: str
-    kind: str                       # budget | waste | route | regression
-    knob: str
+    kind: str                       # budget | waste | route | regression | verification
+    knob: str                       # the REAL hop.yaml dot-path (spec §3), or "" if none exists
     change: dict
     rationale: str
     predicted: str
     evidence: list[str] = field(default_factory=list)
     risk: str = ""
+    # applicability against the artifact's declared surface (filled by classify()):
+    # enactable | blocked_locked | not_tunable | no_declared_knob | advisory
+    applicability: str = "unclassified"
+    applicability_note: str = ""
 
     def as_dict(self) -> dict:
         return {
             "hop": self.hop, "kind": self.kind, "knob": self.knob, "change": self.change,
             "rationale": self.rationale, "predicted": self.predicted,
             "risk": self.risk, "evidence": list(self.evidence),
+            "applicability": self.applicability, "applicability_note": self.applicability_note,
         }
+
+
+def classify(proposals: list[Proposal], tunable: dict[str, tuple[float, float]] | None,
+             locked: set[str] | None) -> list[Proposal]:
+    """Mark each proposal against the artifact's declared surface. ``tunable``
+    maps dot-path -> (min, max) (the loader's EFFECTIVE list incl. inheritance);
+    ``locked`` is the dot-path set. The tuner never bends a lock and never
+    invents a knob: "no applicable knob" is a first-class, publishable outcome.
+    With no surface given, everything stays 'unclassified'."""
+    if tunable is None and locked is None:
+        return proposals
+    tunable = tunable or {}
+    locked = locked or set()
+    for p in proposals:
+        if p.kind == "regression":
+            p.applicability, p.applicability_note = "advisory", "rollback/golden candidate; not a knob change"
+            continue
+        if not p.knob:
+            p.applicability, p.applicability_note = "no_declared_knob", "no hop.yaml field expresses this change"
+            continue
+        if p.knob in locked:
+            p.applicability, p.applicability_note = "blocked_locked", f"{p.knob} is locked on this artifact"
+            continue
+        if p.knob not in tunable:
+            p.applicability, p.applicability_note = "not_tunable", f"{p.knob} exists but is not declared tunable"
+            continue
+        lo, hi = tunable[p.knob]
+        target = p.change.get("to")
+        if isinstance(target, (int, float)) and not (lo <= target <= hi):
+            p.applicability, p.applicability_note = "not_tunable", f"target {target} outside declared range [{lo}, {hi}]"
+            continue
+        p.applicability, p.applicability_note = "enactable", f"within declared range [{lo}, {hi}]"
+    return proposals
 
 
 def propose(facts: list[Fact], tier_order: tuple[str, ...] = DEFAULT_TIER_ORDER) -> list[Proposal]:
     out: list[Proposal] = []
     by_kind: dict[str, list[Fact]] = {"stall": [], "waste-observe": [], "waste-agent": [],
-                                      "route": [], "failure": []}
+                                      "route": [], "failure": [],
+                                      "fired-self-check": [], "fired-anti-churn": []}
     for f in facts:
         p = f.parts
         if len(p) >= 2 and p[1] in by_kind:
@@ -90,8 +131,8 @@ def propose(facts: list[Fact], tier_order: tuple[str, ...] = DEFAULT_TIER_ORDER)
             continue
         task = f.parts[2]
         out.append(Proposal(
-            hop=f.hop, kind="budget", knob=f"budgets.max_turns[{task}]",
-            change={"op": "raise", "by": "50%"},
+            hop=f.hop, kind="budget", knob="budgets.maxTurns",
+            change={"op": "raise", "by": "50%", "scope_note": f"class {task}"},
             rationale=f"{f.value} {task} runs ended in step_budget_stall ({r:.0%})",
             predicted="fewer stalls on this class; cost per run rises for the runs that needed it",
             risk="masks a routing problem if the class is capability-limited (x3 boundary)",
@@ -99,16 +140,23 @@ def propose(facts: list[Fact], tier_order: tuple[str, ...] = DEFAULT_TIER_ORDER)
         ))
 
     # waste: a check that ran often and caught nothing is a candidate to skip
-    for kind, knob in (("waste-observe", "verification.observe"), ("waste-agent", "verification.agent")):
+    # observe has no tunable knob in the spec (builtin:coding|none, categorical) ->
+    # knob="" so classify() reports no_declared_knob honestly; the agent verifier's
+    # size gate IS a declared knob: raise it toward its range max to skip small diffs
+    for kind, knob, change in (
+        ("waste-observe", "", {"op": "skip_for", "task_type": None}),
+        ("waste-agent", "verification.agent.riskGateMinChangedLines", {"op": "raise_to_max"}),
+    ):
         for f in by_kind[kind]:
             fr = f.fraction
             if not fr or fr[0] != 0:
                 continue
             task = f.parts[2]
+            change = {**change, **({"task_type": task} if "task_type" in change else {})}
             out.append(Proposal(
                 hop=f.hop, kind="waste", knob=knob,
-                change={"op": "skip_for", "task_type": task},
-                rationale=f"{knob} ran {fr[1]} times on {task}, caught 0 failures",
+                change=change,
+                rationale=f"{kind.removeprefix('waste-')} check ran {fr[1]} times on {task}, caught 0 failures",
                 predicted="lower tokens/wall per run on this class; no measured correctness loss",
                 risk="the check may be catching nothing because the class is easy TODAY; "
                      "golden suite must include this class",
@@ -134,8 +182,8 @@ def propose(facts: list[Fact], tier_order: tuple[str, ...] = DEFAULT_TIER_ORDER)
             gap_pp = (tiers[best].rate - tiers[t].rate) * 100
             if gap_pp <= ROUTE_MARGIN_PP:
                 out.append(Proposal(
-                    hop=hop, kind="route", knob=f"routing.tier[{task}]",
-                    change={"from": best, "to": t},
+                    hop=hop, kind="route", knob="",   # no routing.tier field exists in hop-v1
+                    change={"from": best, "to": t, "scope_note": f"class {task}"},
                     rationale=(f"tier {t} resolves {task} at {tiers[t].value} vs "
                                f"{best} at {tiers[best].value} ({gap_pp:.1f}pp gap)"),
                     predicted="same resolve rate at the cheaper tier's price",
@@ -144,6 +192,34 @@ def propose(facts: list[Fact], tier_order: tuple[str, ...] = DEFAULT_TIER_ORDER)
                     evidence=[tiers[t].citation, tiers[best].citation],
                 ))
                 break  # cheapest tier within margin wins; one proposal per class
+
+    # verification firing rates -> the knobs most artifacts declare tunable. High
+    # firing = the check intervenes constantly (loosen); near-zero = it is not
+    # doing work (tighten). Either way the change is a MEASURABLE hypothesis for
+    # gen1, never a certainty — the rationale says which direction and why.
+    for kind, knob, loosen, tighten in (
+        ("fired-self-check", "verification.selfCheck.minEdits", "raise", "lower"),
+        ("fired-anti-churn", "verification.antiChurn.threshold", "raise", "lower"),
+    ):
+        for f in by_kind[kind]:
+            r = f.rate
+            if r is None:
+                continue
+            task = f.parts[2]
+            if r >= FIRED_RATE_HIGH:
+                op, why = loosen, f"fires in {r:.0%} of {task} runs (>= {FIRED_RATE_HIGH:.0%}): constant intervention"
+            elif r <= FIRED_RATE_LOW:
+                op, why = tighten, f"fires in {r:.0%} of {task} runs (<= {FIRED_RATE_LOW:.0%}): not doing work"
+            else:
+                continue
+            out.append(Proposal(
+                hop=f.hop, kind="verification", knob=knob,
+                change={"op": op, "step": 1},
+                rationale=f"{knob}: {why} ({f.value})",
+                predicted="fewer/more interventions on this class; effect on correctness is the gen1 question",
+                risk="firing is observable, benefit is not (content-free telemetry) — golden must gate",
+                evidence=[f.citation],
+            ))
 
     # regression: a failure class concentrated on one version is a rollback /
     # golden candidate — advisory, never auto-applied

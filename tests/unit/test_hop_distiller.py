@@ -55,6 +55,17 @@ def test_budget_and_waste_facts_at_floor():
     assert all(g.functional for g in edges)
 
 
+def test_firing_rate_facts_emitted_at_floor():
+    eps = [_run() for _ in range(MIN_RUNS)]
+    for i, ep in enumerate(eps):
+        ep["checks"]["self_check"]["fired"] = i < 6      # 20%
+        ep["checks"]["anti_churn"]["fired"] = i < 1      # ~3%
+    ents, _ = distill_runs(eps)
+    vals = {e.key.split("=")[0]: e.props["value"] for e in ents if e.type == "MetricValue"}
+    assert vals["hop:coding|fired-self-check|bugfix"] == f"6/{MIN_RUNS}"
+    assert vals["hop:coding|fired-anti-churn|bugfix"] == f"1/{MIN_RUNS}"
+
+
 def test_check_that_catches_is_not_waste():
     eps = [_run(observe_passed=(i != 0)) for i in range(MIN_RUNS)]
     ents, _ = distill_runs(eps)
