@@ -30,34 +30,52 @@ from ..graph import get_driver
 from ..pipeline.hop_distiller import distill_runs
 
 
-async def _distill(org: str, hop: str | None, window_days: int, wipe: bool) -> None:
+async def _distill(
+    org: str, hop: str | None, window_days: int, wipe: bool,
+    read_orgs: list[str] | None = None, drop_earliest: int = 0,
+) -> None:
+    """``org`` is where facts are WRITTEN; ``read_orgs`` (default [org]) are the
+    tenants whose telemetry is aggregated — experiments keep arms in separate
+    tenants, so cross-arm facts (routing needs >=2 tiers) read several and write
+    one. ``drop_earliest`` excludes the N earliest events per source tenant
+    (pilot-run exclusion, x12 A4) — filter, never purge."""
     factory = get_session_factory()
     driver = get_driver()
     since = datetime.now(UTC) - timedelta(days=window_days)
+    sources = read_orgs or [org]
     async with factory() as session:
-        rows = (
-            (
-                await session.execute(
-                    select(Episode)
-                    .where(
-                        Episode.org_id == org,
-                        Episode.source == "harness_telemetry",
-                        Episode.action_type == "run.completed",
-                        Episode.occurred_at >= since,
+        payloads: list[dict] = []
+        total_rows = 0
+        for src in sources:
+            rows = (
+                (
+                    await session.execute(
+                        select(Episode)
+                        .where(
+                            Episode.org_id == src,
+                            Episode.source == "harness_telemetry",
+                            Episode.action_type == "run.completed",
+                            Episode.occurred_at >= since,
+                        )
+                        .order_by(Episode.occurred_at)
                     )
-                    .order_by(Episode.occurred_at)
                 )
+                .scalars()
+                .all()
             )
-            .scalars()
-            .all()
-        )
-        payloads = [
-            r.payload for r in rows
-            if r.payload.get("contract") == "d11.2"
-            and (hop is None or (r.payload.get("hop") or {}).get("name") == hop)
-        ]
-        print(f"{len(rows)} telemetry episodes, {len(payloads)} d11.2 in window "
-              f"({window_days}d{f', hop={hop}' if hop else ''})")
+            total_rows += len(rows)
+            if drop_earliest:
+                dropped = rows[:drop_earliest]
+                rows = rows[drop_earliest:]
+                for d in dropped:
+                    print(f"  pilot-excluded {src}: {d.event_id} @ {d.occurred_at.isoformat()}")
+            payloads.extend(
+                r.payload for r in rows
+                if r.payload.get("contract") == "d11.2"
+                and (hop is None or (r.payload.get("hop") or {}).get("name") == hop)
+            )
+        print(f"{total_rows} telemetry episodes across {sources}, {len(payloads)} d11.2 in window "
+              f"({window_days}d{f', hop={hop}' if hop else ''}) -> writing to {org}")
         ents, edges = distill_runs(payloads)
         if not edges:
             print("nothing cleared its floor — no facts written (silence, not weak claims)")
@@ -114,8 +132,16 @@ def main() -> int:
     ap.add_argument("--hop", default=None)
     ap.add_argument("--window-days", type=int, default=30)
     ap.add_argument("--wipe", action="store_true")
+    ap.add_argument("--orgs", default=None,
+                    help="comma-separated source tenants to read (default: --org)")
+    ap.add_argument("--drop-earliest", type=int, default=0,
+                    help="exclude the N earliest events per source tenant (pilot exclusion)")
     args = ap.parse_args()
-    asyncio.run(_distill(args.org, args.hop, args.window_days, args.wipe))
+    asyncio.run(_distill(
+        args.org, args.hop, args.window_days, args.wipe,
+        read_orgs=args.orgs.split(",") if args.orgs else None,
+        drop_earliest=args.drop_earliest,
+    ))
     return 0
 
 
