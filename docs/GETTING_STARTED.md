@@ -35,7 +35,6 @@ and the LLM extraction tiers.
 ```bash
 git clone https://github.com/mlpal-ai/mlpal-memory
 cd mlpal-memory
-cd ui-app && npm install && npm run build && cd ..
 docker compose up --build
 ```
 
@@ -149,6 +148,21 @@ python evals/x10/run_x10.py       # the with/without-memory agent ablation
 For x10, author ~10 questions about your org with machine-checkable answers
 in `evals/x10/tasks.yaml`, mark the ones whose true answer changed over time,
 and run both arms. If your numbers disagree with ours, open an issue.
+
+## 8. Run it for real
+
+The stack above trusts identity headers (dev auth) and is for one machine. To expose an instance
+to a team, mint keys and start the production overlay; every key is pinned to one tenant and the
+MCP forwards the caller's key unchanged:
+
+```bash
+python -m mlpal_memory_graph.tools.api_keys new --file api_keys.yaml --id sai --org acme --user sai
+POSTGRES_PASSWORD=... MLPAL_INTERNAL_SERVICE_API_KEY=... \
+  docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+claude mcp add mlpal-memory --transport http http://<host>:8011/mcp --header "X-API-Key: mem_..."
+```
+
+Sizing, backups, upgrades, metrics and the full setting list: [SELF_HOSTING.md](SELF_HOSTING.md).
 
 ## Where to go next
 

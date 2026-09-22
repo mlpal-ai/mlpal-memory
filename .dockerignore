@@ -1,0 +1,17 @@
+# Build context: the service, its migrations and the UI source. Everything else stays out —
+# the benchmark datasets and raw results alone are gigabytes.
+.git
+.venv
+**/__pycache__
+**/*.pyc
+.pytest_cache
+node_modules
+ui-app/node_modules
+ui-app/dist
+evals/
+docs/
+tests/
+k8s/
+scripts/
+.env
+.env.*

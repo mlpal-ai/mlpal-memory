@@ -9,11 +9,12 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...core.config import get_settings
+from ...core.topics import grant_from_headers
 from ...db import get_session
 from ...db.models import Episode
 from ...db.scoping import browse_clause
@@ -32,6 +33,7 @@ router = APIRouter(prefix="/episodes", tags=["ingest"])
 
 @router.post("", status_code=202, response_model=IngestResponse)
 async def ingest_episodes(
+    request: Request,
     body: IngestRequest,
     session: Annotated[AsyncSession, Depends(get_session)],
     identity: Annotated[AuthIdentity, Depends(require_permission("memory.write"))],
@@ -40,8 +42,19 @@ async def ingest_episodes(
     settings = get_settings()
     accepted = duplicates = processed = 0
     updater = get_updater() if process else None
+    # memory v6 WP11: a HOP writes only its own topics. The host stamps the contract on the call;
+    # a claim outside it is refused before anything is stored (the sidecar refuses earlier; this is
+    # the backstop). No contract on the call → no restriction (legacy callers, people).
+    grant = grant_from_headers(request.headers, identity.user_id)
 
     for env in body.episodes:
+        if grant is not None and env.action_type == "memory.claim":
+            topic = str((env.payload or {}).get("topic") or "")
+            if not grant.may_write(topic):
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"topic {topic!r} is outside this HOP's memory contract ({grant.describe()})",
+                )
         # Tenant boundary: only the trusted machine-to-machine service may target a tenant
         # per-episode (multi-tenant ingest). Every other caller — users, org admins — is pinned
         # to their own org, so a body-supplied org_id can't smuggle a write into another tenant.

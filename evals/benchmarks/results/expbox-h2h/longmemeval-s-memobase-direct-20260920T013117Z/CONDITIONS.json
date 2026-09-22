@@ -1,0 +1,8 @@
+{
+ "write-time LLM": "claude-haiku-4-5-20251001 via the counting proxy \u2192 MLPal gateway (profile + event extraction on flush)",
+ "embedder": "text-embedding-3-small via the counting proxy (event embeddings)",
+ "store": "Memobase server (prebuilt image) + pgvector + redis under docker compose",
+ "item": "profile slot (topic/sub-topic: value) and event gist with tags; dates as Memobase writes them into the text ([mention \u2026, event \u2026]); no item date field (its created_at is the ingest day)",
+ "ingest unit": "one ChatBlob per session (created_at = session date), insert + flush(sync)",
+ "search": "profile() plus search_event(query, topk=k, similarity_threshold=0, time_range_in_days=36500)"
+}

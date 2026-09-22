@@ -1,0 +1,25 @@
+# Production overlay for a self-hosted instance (docs/SELF_HOSTING.md):
+#
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+#
+# Dev auth is off, callers present a key from the operator's key file, the database password
+# and the internal service key are required (no defaults), and Postgres is not published.
+services:
+  postgres:
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+    ports: !reset []
+  memory-graph:
+    environment:
+      MLPAL_ENVIRONMENT: production
+      MLPAL_DEBUG: "false"
+      MLPAL_DEV_AUTH: "false"
+      MLPAL_DB_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      MLPAL_INTERNAL_SERVICE_API_KEY: ${MLPAL_INTERNAL_SERVICE_API_KEY:?set MLPAL_INTERNAL_SERVICE_API_KEY to a random secret}
+      MLPAL_API_KEYS_FILE: /config/api_keys.yaml
+    volumes:
+      - ${MLPAL_API_KEYS_FILE:-./api_keys.yaml}:/config/api_keys.yaml:ro
+  memory-mcp:
+    environment:
+      MLPAL_DEV_AUTH: "false"
+      MLPAL_DEMO_ORG_ID: ""

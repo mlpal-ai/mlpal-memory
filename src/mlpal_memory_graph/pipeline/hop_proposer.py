@@ -19,6 +19,9 @@ import re
 from dataclasses import dataclass, field
 
 STALL_RATE_MIN = 0.20      # >=20% step-budget stalls on a class -> budget proposal
+BYPASS_RATE_MIN = 0.50     # memory v10: >=50% of injected runs re-read memory -> the prompt bypasses its projection
+SILENT_RATE_MIN = 0.20     # memory v10: >=20% of runs finish with no tool call -> the prompt answers from nothing
+CAPABILITY_UNUSED_MAX = 0.02  # memory v10: a provider touched by <=2% of runs is a module to switch off (advisory)
 FIRED_RATE_HIGH = 0.50     # an intervention check firing in >=50% of runs -> loosen its knob
 FIRED_RATE_LOW = 0.05      # firing in <=5% of runs -> tighten (it is not doing work)
 ROUTE_MARGIN_PP = 5.0      # cheaper tier within 5pp of best tier -> routing proposal
@@ -60,7 +63,7 @@ class Fact:
 @dataclass
 class Proposal:
     hop: str
-    kind: str                       # budget | waste | route | regression | verification
+    kind: str                       # budget | waste | route | regression | verification | eval | memory | capability
     knob: str                       # the REAL hop.yaml dot-path (spec §3), or "" if none exists
     change: dict
     rationale: str
@@ -96,6 +99,15 @@ def classify(proposals: list[Proposal], tunable: dict[str, tuple[float, float]] 
         if p.kind == "regression":
             p.applicability, p.applicability_note = "advisory", "rollback/golden candidate; not a knob change"
             continue
+        if p.kind == "eval":
+            p.applicability, p.applicability_note = "advisory", "eval candidate from a deviation memory; the builder authors the case (feeds: evals)"
+            continue
+        if p.kind == "memory":
+            p.applicability, p.applicability_note = "advisory", "a prompt change; the owner edits the prompt, no knob"
+            continue
+        if p.kind == "capability" and p.knob not in tunable:
+            p.applicability, p.applicability_note = "advisory", f"{p.knob} is not declared tunable: the owner switches the module off by hand"
+            continue
         if not p.knob:
             p.applicability, p.applicability_note = "no_declared_knob", "no hop.yaml field expresses this change"
             continue
@@ -105,7 +117,15 @@ def classify(proposals: list[Proposal], tunable: dict[str, tuple[float, float]] 
         if p.knob not in tunable:
             p.applicability, p.applicability_note = "not_tunable", f"{p.knob} exists but is not declared tunable"
             continue
-        lo, hi = tunable[p.knob]
+        rng = tunable[p.knob]
+        if isinstance(rng, (set, frozenset)):  # enum-set range (hop-v1.1 §6): categorical knobs
+            target = p.change.get("to")
+            if target in rng:
+                p.applicability, p.applicability_note = "enactable", f"member of declared set {sorted(rng)}"
+            else:
+                p.applicability, p.applicability_note = "not_tunable", f"target {target!r} not in declared set {sorted(rng)}"
+            continue
+        lo, hi = rng
         target = p.change.get("to")
         if isinstance(target, (int, float)) and not (lo <= target <= hi):
             p.applicability, p.applicability_note = "not_tunable", f"target {target} outside declared range [{lo}, {hi}]"
@@ -116,13 +136,59 @@ def classify(proposals: list[Proposal], tunable: dict[str, tuple[float, float]] 
 
 def propose(facts: list[Fact], tier_order: tuple[str, ...] = DEFAULT_TIER_ORDER) -> list[Proposal]:
     out: list[Proposal] = []
-    by_kind: dict[str, list[Fact]] = {"stall": [], "waste-observe": [], "waste-agent": [],
+    by_kind: dict[str, list[Fact]] = {"deviation": [], "stall": [], "waste-observe": [], "waste-agent": [],
                                       "route": [], "failure": [],
-                                      "fired-self-check": [], "fired-anti-churn": []}
+                                      "fired-self-check": [], "fired-anti-churn": [],
+                                      "memory-bypass": [], "silent": [], "capability": []}
     for f in facts:
         p = f.parts
         if len(p) >= 2 and p[1] in by_kind:
             by_kind[p[1]].append(f)
+
+    # memory v10: prompt facts from d11.6/7 — no hop.yaml knob expresses them, so they are advisory
+    # proposals the owner reads (a prompt edit is a build decision, never an automatic one)
+    for f in by_kind["memory-bypass"]:
+        r = f.rate
+        if r is None or r < BYPASS_RATE_MIN:
+            continue
+        task = f.parts[2]
+        out.append(Proposal(
+            hop=f.hop, kind="memory", knob="",
+            change={"op": "prompt", "note": "the prompt re-reads state that the projection already injected: drop the read step, or inject the topic it reads (`inject: true`), or raise the projection budget"},
+            rationale=f"{f.value} {task} runs that started with memory injected still called a memory read tool ({r:.0%})",
+            predicted="fewer tool calls and tokens per run on this class; the same answers",
+            risk="a read that checks freshness on purpose looks the same in telemetry; confirm on the prompt before removing it",
+            evidence=[f.citation],
+        ))
+    for f in by_kind["silent"]:
+        r = f.rate
+        if r is None or r < SILENT_RATE_MIN:
+            continue
+        task = f.parts[2]
+        out.append(Proposal(
+            hop=f.hop, kind="memory", knob="",
+            change={"op": "prompt", "note": "runs complete with no tool call: either memory answered (fine, then say so in the report) or the prompt let the model answer from nothing (add a required probe)"},
+            rationale=f"{f.value} {task} runs completed with no tool call ({r:.0%})",
+            predicted="answers grounded in a read or in an injected memory, never in the model alone",
+            risk="a class that legitimately answers from injected state will look silent; pair with the memory-bypass fact",
+            evidence=[f.citation],
+        ))
+
+    for f in by_kind["capability"]:
+        r = f.rate
+        if r is None or r > CAPABILITY_UNUSED_MAX or len(f.parts) < 4:
+            continue
+        task, provider = f.parts[2], f.parts[3]
+        out.append(Proposal(
+            # memory v10: a capability module is a knob when the artifact declares it
+            # (`modules.<provider>.enabled`, range [on, off]); otherwise the proposal is advisory
+            hop=f.hop, kind="capability", knob=f"modules.{provider}.enabled",
+            change={"op": "set", "to": "off", "provider": provider},
+            rationale=f"{f.value} {task} runs called {provider} ({r:.0%}); the {provider} sections of the prompt, its tools and routes are carried but unused",
+            predicted="a shorter, cheaper prompt and tool list; nothing changes for the providers in use",
+            risk=f"a {provider} question after the switch is a deviation that proposes turning the module back on",
+            evidence=[f.citation],
+        ))
 
     # budget: a class that stalls often needs a bigger budget or a bigger model
     for f in by_kind["stall"]:
@@ -188,7 +254,7 @@ def propose(facts: list[Fact], tier_order: tuple[str, ...] = DEFAULT_TIER_ORDER)
             gap_pp = (tiers[best].rate - tiers[t].rate) * 100
             if gap_pp <= ROUTE_MARGIN_PP:
                 out.append(Proposal(
-                    hop=hop, kind="route", knob="",   # no routing.tier field exists in hop-v1
+                    hop=hop, kind="route", knob="model.main",   # hop-v1.1 §8: the main-loop tier is a knob
                     change={"from": best, "to": t, "scope_note": f"class {task}"},
                     rationale=(f"tier {t} completes {task} at {tiers[t].value} vs "
                                f"{best} at {tiers[best].value} ({gap_pp:.1f}pp gap); "
@@ -227,6 +293,24 @@ def propose(facts: list[Fact], tier_order: tuple[str, ...] = DEFAULT_TIER_ORDER)
                 risk="firing is observable, benefit is not (content-free telemetry) — golden must gate",
                 evidence=[f.citation],
             ))
+
+    # deviation (hop-v1.1 §9.2): what the agent recorded as "not to plan" is the eval backlog —
+    # advisory, no knob expresses "write a case"; the builder authors it and a person reviews it
+    for f in by_kind["deviation"]:
+        if len(f.parts) < 3:
+            continue
+        kind = f.parts[2]
+        count = int(f.value.split(" ", 1)[0]) if f.value[:1].isdigit() else 0
+        if count < 1:
+            continue
+        out.append(Proposal(
+            hop=f.hop, kind="eval", knob="",
+            change={"op": "author_case", "deviation": kind, "count": count},
+            rationale=f"{count} {kind} deviation(s) recorded by the agent in the window",
+            predicted="a golden case that reproduces the deviation makes the fix measurable and keeps it fixed",
+            risk="a deviation can be environment coverage (the eval's), not the HOP's; triage the layer before authoring",
+            evidence=[f.citation],
+        ))
 
     # regression: a failure class concentrated on one version is a rollback /
     # golden candidate — advisory, never auto-applied

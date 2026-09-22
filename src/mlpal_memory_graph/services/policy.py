@@ -32,6 +32,15 @@ class ResolvedPolicy:
     deny_sources: set[str] = field(default_factory=set)
     allow_sources: set[str] | None = None  # None = no allow-list constraint
     metadata_deny: dict[str, set[str]] = field(default_factory=dict)
+    # memory v7 WP4 (design §9): documents are admitted by salience and a per-source daily budget,
+    # never by size. The strictest value along the scope chain wins.
+    min_salience: float | None = None
+    source_budget_per_day: dict[str, int] = field(default_factory=dict)
+
+    def budget_for(self, source: str | None) -> int | None:
+        if source is None:
+            return None
+        return self.source_budget_per_day.get(source, self.source_budget_per_day.get("*"))
 
     def drop_reason(self, *, source: str, metadata: dict | None) -> str | None:
         """Return the rule id that excludes this item, or None to keep it."""
@@ -73,6 +82,13 @@ async def resolve_extraction_policy(
             )
         for key, vals in (p.get("metadata_deny") or {}).items():
             resolved.metadata_deny.setdefault(key, set()).update(vals)
+        ms = p.get("min_salience")
+        if isinstance(ms, (int, float)):
+            resolved.min_salience = max(resolved.min_salience or 0.0, float(ms))
+        for src, n in (p.get("source_budget_per_day") or {}).items():
+            if isinstance(n, int):
+                cur = resolved.source_budget_per_day.get(src)
+                resolved.source_budget_per_day[src] = n if cur is None else min(cur, n)
     return resolved
 
 

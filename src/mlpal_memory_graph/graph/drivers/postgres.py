@@ -246,6 +246,51 @@ class PostgresDriver(GraphDriver):
             await session.flush()
         return n
 
+    async def reopen_entity(self, session, *, tenant_id, key):
+        """A watcher sees the target again: the node returns to the current view (edges are not
+        resurrected; new observations write new ones). Returns the count."""
+        rows = (await session.execute(
+            select(Node).where(Node.org_id == tenant_id, or_(Node.key == key, Node.name == key), Node.status == "ended")
+        )).scalars().all()
+        for n in rows:
+            n.status = "committed"
+        return len(rows)
+
+    async def end_entity(self, session, *, tenant_id, key, at, keep_edge_ids=()):
+        """memory v6 WP15 (§7 observation of absence): an entity a watcher no longer sees is ended at
+        world-time ``at``: every live edge touching a node of this tenant whose key (or name) is
+        ``key`` is closed (invalid_at = at, expired_at = now). Node-follows-edge then hides it from
+        the current view while an as-of read before ``at`` still reaches it. Append-only; returns
+        the count. ``keep_edge_ids`` protects the watch anchor's own HAS_VALUE edge that carries the
+        'absent since' value."""
+        ids = [r for (r,) in (await session.execute(
+            select(Node.id).where(Node.org_id == tenant_id, or_(Node.key == key, Node.name == key),
+                                  Node.type.notin_(("Metric", "MetricValue")))
+        )).all()]
+        if not ids:
+            return 0
+        # the entity itself leaves the current view (status ended, like a superseded value); its
+        # history stays reachable as-of, and a later 'present' observation reopens it
+        for n in (await session.execute(select(Node).where(Node.id.in_(ids)))).scalars().all():
+            n.status = "ended"
+        rows = (await session.execute(
+            select(Edge).where(Edge.org_id == tenant_id, Edge.invalid_at.is_(None),
+                               or_(Edge.src_id.in_(ids), Edge.dst_id.in_(ids)))
+        )).scalars().all()
+        now = datetime.now(UTC)
+        at_utc = _as_utc(at) or now
+        n = 0
+        for e in rows:
+            if e.id in keep_edge_ids:
+                continue
+            started = _as_utc(e.valid_at)
+            if started and started > at_utc:
+                continue
+            e.invalid_at = at_utc
+            e.expired_at = now
+            n += 1
+        return n
+
     async def invalidate_edge(self, session, *, tenant_id, scope, type_, src_id, dst_id, at):
         """Explicitly end an active (src, type, dst) relation at world-time ``at``.
 
@@ -287,13 +332,20 @@ class PostgresDriver(GraphDriver):
         type_=None,
         sources=None,
         limit=10,
+        at=None,
     ):
         if not scopes:
             return []  # no accessible scope -> no results (never a tenant-wide scan)
         filters = [or_(*[_scope_clause(Node, tenant_id, s) for s in scopes])]
         # v3 lifecycle: expired working-tier memories are dead even before the TTL sweep
-        # physically removes them — correctness must not depend on sweep timing.
-        filters.append(or_(Node.expires_at.is_(None), Node.expires_at > func.now()))
+        # physically removes them — correctness must not depend on sweep timing. memory v7: a
+        # writer-set expiry is judged at the read's instant (`at`, the as-of), so "the exam is
+        # tomorrow" is gone today and still there as of yesterday.
+        filters.append(or_(Node.expires_at.is_(None), Node.expires_at > (at if at is not None else func.now())))
+        if at is None:
+            # current view: a superseded value or an ended entity is history, reachable as-of but not
+            # by a plain search (memory v9 L40: three versions of one topic's tally were served together)
+            filters.append(Node.status.notin_(("superseded", "ended")))
         if type_:
             filters.append(Node.type == type_)
         if sources:
@@ -333,7 +385,7 @@ class PostgresDriver(GraphDriver):
         return [ScoredNode(n, 0.0) for n in candidates[:limit]]
 
     async def lexical_search_nodes(
-        self, session, *, tenant_id, scopes, text, type_=None, sources=None, limit=10
+        self, session, *, tenant_id, scopes, text, type_=None, sources=None, limit=10, at=None,
     ):
         """The hybrid lexical leg (BM25-style). Postgres: weighted FTS (name=A, summary=B) via
         ``ts_rank_cd`` UNIONed with pg_trgm similarity + key-prefix for identifier recall
@@ -346,8 +398,10 @@ class PostgresDriver(GraphDriver):
         if not scopes or not text:
             return []
         base = [or_(*[_scope_clause(Node, tenant_id, s) for s in scopes])]
-        # v3 lifecycle: expired working-tier rows are dead regardless of sweep timing.
-        base.append(or_(Node.expires_at.is_(None), Node.expires_at > func.now()))
+        # v3 lifecycle: expired working-tier rows are dead regardless of sweep timing (v7: at `at`).
+        base.append(or_(Node.expires_at.is_(None), Node.expires_at > (at if at is not None else func.now())))
+        if at is None:
+            base.append(Node.status.notin_(("superseded", "ended")))
         if type_:
             base.append(Node.type == type_)
         if sources:
@@ -358,11 +412,21 @@ class PostgresDriver(GraphDriver):
             # index is used (regconfig cast + ``||`` rather than the only-STABLE concat_ws).
             doc = func.coalesce(Node.name, "").concat(" ").concat(func.coalesce(Node.summary, ""))
             tsv = func.to_tsvector(literal_column("'english'::regconfig"), doc)
+            # OR semantics + term coverage, not plainto's AND: a question ("what did today's
+            # cost-daily report say") carries words no node name has, and AND silenced the leg
+            # (the direct tier learned the same lesson: services/direct.py). Full-match rows
+            # still rank first through ts_rank_cd on the AND query.
             tsq = func.plainto_tsquery("english", text)
+            terms = [t.lower() for t in re.findall(r"[a-zA-Z0-9_]{3,}", text)][:8]
+            any_tsq = func.to_tsquery("english", " | ".join(terms)) if terms else tsq
+            coverage = None
+            for t in terms:
+                hit = case((tsv.op("@@")(func.to_tsquery("english", t)), 1.0 / len(terms)), else_=0.0)
+                coverage = hit if coverage is None else coverage + hit
             sim = func.similarity(Node.name, text)  # pg_trgm
-            score = (func.ts_rank_cd(tsv, tsq) + sim).label("lex")
+            score = (func.ts_rank_cd(tsv, tsq) + (coverage if coverage is not None else 0.0) + sim).label("lex")
             matched = or_(
-                tsv.op("@@")(tsq),  # full-text match
+                tsv.op("@@")(any_tsq),  # any query term
                 Node.name.op("%")(text),  # trigram-similar (pg_trgm threshold)
                 func.lower(Node.key).like(func.lower(text) + "%"),  # identifier prefix
             )

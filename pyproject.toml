@@ -1,6 +1,6 @@
 [project]
 name = "mlpal-memory"
-version = "0.1.0"
+version = "0.2.0"
 description = "Institutional memory graph for enterprises using MLPal — a temporal, ontology-typed knowledge graph updated on every platform interaction."
 readme = "README.md"
 requires-python = ">=3.12"

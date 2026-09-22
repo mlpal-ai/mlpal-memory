@@ -1,73 +1,71 @@
 # MLPal Memory
 
-**Institutional memory for AI agents: bi-temporal, ontology-typed, governed,
-and deterministic on the read path.**
+**Institutional memory for AI agents: bi-temporal, governed, deterministic on the read path,
+and measured against the field.**
 
-MLPal Memory turns what your organization's agents and people already produce
-(coding sessions, markdown knowledge, repositories, PDFs, harness telemetry)
-into a governed memory store that any agent can query in milliseconds. In our
-preregistered study, Claude Code with this memory answered 10/10 real org
-questions against 6/10 without it, at the same median cost per task and the
-same number of agent turns; on the three questions whose true answer had
-changed over time, the baseline scored 0/3 and bounced the question back to
-the human. The harness ships in this repo (`evals/x10/`), so you can run the
-same ablation on your own org.
+MLPal Memory turns what your organization's agents and people already produce (coding sessions,
+markdown knowledge, repositories, PDFs, harness telemetry) into a memory store any agent can
+query in milliseconds. Nothing on the write path calls a model: passages are stored verbatim and
+indexed lexically and semantically, and facts are extracted by rules that never guess. What is
+served is what was said, with its date and its source, and a fact that was superseded is served
+as history, never as the present.
 
-- **Two tiers.** *Direct* memory stores verbatim, citeable passages; *derived*
-  memory holds ontology-typed facts with provenance links back to the evidence
-  they came from. Facts never float free of their sources.
-- **Bi-temporal.** Every fact carries valid-time and system-time. Supersession
-  invalidates instead of deleting; `as_of` reads answer "what did we believe at
-  *t*?" in either timeline. Watched values (costs, versions, endpoints) get
-  stable-key histories: the current value wins, every prior value stays
-  reconstructable.
-- **An answer ladder, priced honestly.** The default read is a deterministic
-  packet: hybrid retrieval (IDF-weighted full-text + semantic ANN, weighted
-  reciprocal-rank fusion, recency decay, per-document diversity), **zero model
-  calls**, ~150 ms. Above it, `mode=hop` runs a bounded retrieve-reformulate
-  loop that in our n=40 goldset reached 72% grounded answers against the 48%
-  one-shot ceiling. Citations are enforced server-side: anything the model
-  cites that was not actually retrieved is stripped and counted. The hop
-  streams its trace live over SSE, and the UI shows every step.
-- **Forgetting is a feature.** Delete a document (audited), purge a workspace
-  (owner-scoped, both tiers), or say it in natural language: the curator
-  proposes exact deletions with usage evidence, and nothing is removed until a
-  human confirms the exact ids. Usage counters record what memory actually
-  serves, so you measure junk before deleting it.
-- **Governed writes.** Every ingest flows through one auditable gate: consent
-  (per-scope opt-out with purge-on-clear), deterministic extraction policy, and
-  secret redaction, before anything is stored.
-- **Scope hierarchy.** global / org / team / service / repo / agent / user,
-  with owner-only personal memory (enforced against administrators) and a
-  workspace facet for "me, in repo X" focus.
-- **Agent-safe by contract.** The MCP surface is read-only (pinned by test),
-  forwards the caller's own credential, and holds no secrets. Writing to
-  memory happens through ingestion and human-confirmed curation, never through
-  a tool an agent could be prompt-injected into calling.
+## Measured
 
-Scale: retrieval quality and latency are flat from 5k to 1,000,000 chunks
-(100% hit@5 on the probe set throughout; 142 ms p50 at 1M on one r6i.2xlarge).
-The design and its evaluation are described in the launch paper,
-[`docs/paper/mlpal-memory-paper.pdf`](docs/paper/mlpal-memory-paper.pdf)
-(launch post: link forthcoming).
+Same harness, same Sonnet 5 reader, the benchmark's own judge templates, every competitor run
+from its open-source code under one protocol with its write-time models metered
+([docs/benchmarks](docs/benchmarks/README.md)).
 
-New here? The step-by-step walkthrough is
-[`docs/GETTING_STARTED.md`](docs/GETTING_STARTED.md).
+**LongMemEval, oracle split, 100 stratified questions (2026-09-20):**
+
+| system | accuracy | write-time $ per 1k haystacks | all-in $ per 1k questions |
+|---|---|---|---|
+| **MLPal Memory** | **0.927** | **0** | 16 |
+| Memobase | 0.875 | 27 | 37 |
+| mem0 | 0.854 | 27 | 34 |
+| supermemory | 0.792 | 108 | 120 |
+| LangMem | 0.708 | 17 | 26 |
+| Graphiti (47 questions reached) | 0.66 | 410 | |
+| Cognee | 0.625 | 34 | 56 |
+
+**LongMemEval, S split (48-session haystacks), 100 stratified questions (2026-09-22):** 0.865,
+tied with mem0 and Memobase on the questions they reached under a $35 write-time cap each, at
+zero write-time cost ([S100.md](docs/benchmarks/S100.md)).
+
+What this does not say: these are our runs of their code, not their published numbers (different
+judge, reader and sample), and no hosted product was measured. The gap to the second and third
+systems on the oracle split is outside run-to-run noise; the gap between those two is not. Under
+load the service ingests about three documents per second per eight embedder cores with search
+p99 under 600 ms ([HARDENING.md](docs/benchmarks/HARDENING.md)).
+
+## What it does
+
+- **Two tiers.** *Direct* memory stores verbatim, citeable passages; *derived* memory holds
+  typed facts with provenance back to the evidence. Facts never float free of their sources.
+- **Bi-temporal.** Every fact carries valid time and system time. Supersession invalidates
+  instead of deleting; `as_of` reads answer "what did we believe then?".
+- **Deterministic read path.** Search, the answer packet and the projection an agent loads at
+  session start make zero model calls. A model is optional, only for synthesis and only if you
+  bring one.
+- **Governed.** Scopes (org, team, service, repo, agent, user), per-scope consent and policy,
+  owner-only personal memory, two-phase forgetting with a deletion certificate, secret redaction.
+- **Trust by consequence.** A learning an agent writes is on probation until runs that saw it
+  succeed; endorsed facts rank first, retracted ones leave. Owners can pin what must always be in
+  front of an agent, with an expiry.
+- **A door for the owner.** Harness telemetry is distilled into facts about how a harness
+  profile behaves; proposals to tune it wait for a person's approval, and a rejection's reason is
+  itself a memory the next proposal reads.
+- **Built to degrade, not fail.** Model outages open a breaker; search falls back to its lexical
+  legs and says so; ingest is bounded and queues instead of dropping.
 
 ## Quickstart
 
 ```bash
-docker compose up --build          # Postgres (pgvector) + API/worker + read-only MCP
+docker compose up --build          # Postgres (pgvector) + API/worker + MCP; builds the UI too
 ```
 
-Open the UI at **http://localhost:8000/ui/** (build it once with
-`cd ui-app && npm install && npm run build`). The Connect page in the sidebar
-gives you the copy-paste agent setup.
-
-Semantic embeddings run **in-process** by default (`bge-small` via ONNX; no API
-key, no external calls; the model downloads on first use). Point
-`MLPAL_EMBEDDINGS_PROVIDER=gateway` at an OpenAI-compatible `/v1/embeddings`
-endpoint to use a hosted embedder instead.
+Open the UI at **http://localhost:8000/ui/**. Embeddings run in-process by default (`bge-small`
+via ONNX; no API key; the model downloads on first use).
 
 ### Ingest your own corpus
 
@@ -75,10 +73,8 @@ endpoint to use a hosted embedder instead.
 python scripts/collect_local.py --source all      # Claude Code sessions, md/skills, repos, PDFs
 ```
 
-Collectors are idempotent (content-hashed ids + server-side dedup); re-run them
-any time. Unchanged inputs are recognized, changed files become new versions
-with their own event time, and multi-day sessions are segmented per day so the
-timeline stays honest.
+Collectors are idempotent (content-hashed ids, server-side dedup). Changed files become new
+versions with their own event time; multi-day sessions are segmented per day.
 
 ### Ask it questions
 
@@ -95,50 +91,68 @@ curl -Ns "http://localhost:8000/api/v1/memory/answer/stream" \
   -H "X-Test-Org-Id: local" -H "X-Test-User-Id: $USER"
 ```
 
-### Plug into Claude Code
+### Plug into an agent
 
 ```bash
 claude mcp add mlpal-memory --transport http http://localhost:8011/mcp
 ```
 
-The MCP serves `memory_search`, `memory_get`, and `memory_answer`, read-only.
-See `docs/integrations/` for the full agent-integration guide. yodex users:
-memory is a first-class backend there (`memory.backend=graph`), plus the same
-MCP path.
+The MCP serves `memory_search`, `memory_get`, `memory_answer`, `memory_brief`, `memory_notes`,
+`memory_document`, and the governed writes `memory_write`, `memory_endorse`, `memory_retract`.
+See [docs/integrations](docs/integrations/) for the agent-integration guide; in yodex, memory is
+a first-class backend (`memory.backend=graph`).
 
 ### Forget things
 
 ```bash
-# Direct: delete one document (audited).
 curl -X DELETE "http://localhost:8000/api/v1/documents/<id>" \
   -H "X-Test-Org-Id: local" -H "X-Test-User-Id: $USER"
-
-# Natural language, two-phase: preview exactly what would go, then confirm.
-# (Or use the Manage page in the UI.)
 ```
 
-## Evaluate on your corpus
+Natural-language forgetting is two-phase: preview exactly what would go, then confirm (the Manage
+page in the UI does the same).
+
+## Run it for a team
+
+The quickstart trusts identity headers and is for one machine. For an instance other people reach,
+mint keys and start the production overlay: dev auth is off, every key is pinned to one tenant,
+the MCP forwards the caller's key unchanged.
 
 ```bash
-python evals/run_eval.py         # retrieval quality vs a grep baseline (edit evals/goldset.yaml)
-python evals/run_probes.py       # live contract probes: freshness, deletion certificate
-python evals/run_probes.py --replay   # + rebuild-equivalence replay canary
-python evals/x10/run_x10.py      # the with/without-memory agent ablation (edit evals/x10/tasks.yaml)
+python -m mlpal_memory_graph.tools.api_keys new --file api_keys.yaml --id sai --org acme --user sai
+POSTGRES_PASSWORD=... MLPAL_INTERNAL_SERVICE_API_KEY=... \
+  docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+claude mcp add mlpal-memory --transport http http://<host>:8011/mcp --header "X-API-Key: mem_..."
 ```
 
-The probe suite runs the store's maintenance contracts end-to-end against your
-deployment and emits machine-readable verdicts, including a deletion
-certificate proving a purged scope is gone from every read surface. The x10
-harness is the preregistered usefulness study from the paper: author questions
-about your own org, mark the ones whose answer changed over time, and measure
-correctness, cost per task, and turns in both arms.
+Sizing, backups, upgrades, metrics and every setting: [docs/SELF_HOSTING.md](docs/SELF_HOSTING.md).
+Images: `ghcr.io/mlpal-ai/mlpal-memory:<version>` (amd64, arm64).
+
+## Evaluate it
+
+```bash
+bash evals/benchmarks/fetch_datasets.sh                  # LongMemEval, LoCoMo, ConvoMem
+uv run python evals/benchmarks/bench.py run --bench longmemeval --split oracle --limit 100 --stratify
+uv run python evals/benchmarks/bench.py run --bench longmemeval --split oracle --limit 100 --stratify --system mem0
+python evals/run_eval.py                                 # retrieval quality on your own goldset
+python evals/x10/run_x10.py                              # with/without-memory agent ablation on your org
+```
+
+The benchmark kit runs every system through the same loop with its model usage metered; the
+adapters for mem0, Memobase, supermemory, LangMem, Graphiti and Cognee ship in
+`evals/benchmarks/systems/`.
 
 ## Development
 
 ```bash
-uv sync --extra pg --extra local-embeddings
-pytest -q                        # offline suite (SQLite) + Postgres-marked tests
+uv sync --extra pg --extra mcp --extra local-embeddings
+uv run pytest -q                 # offline suite (SQLite); Postgres-marked tests need MLPAL_TEST_POSTGRES_DSN
 ```
+
+The in-process embedder needs an `onnxruntime` wheel for your platform (Linux, macOS on Apple
+silicon, Windows). On an Intel Mac run the service in Docker or use `MLPAL_EMBEDDINGS_PROVIDER=gateway`.
+
+Changes per release: [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 

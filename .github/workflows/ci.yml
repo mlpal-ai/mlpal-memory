@@ -1,0 +1,60 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg18
+        env:
+          POSTGRES_PASSWORD: localdev   # ephemeral CI database, not a secret
+          POSTGRES_DB: mlpal
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv python install 3.12
+      - run: uv sync --extra pg --extra mcp --extra local-embeddings
+      - name: Lint
+        run: uv run ruff check --select F,E9,B src/ tests/
+      - name: Offline suite (SQLite)
+        run: uv run pytest tests/ -q
+      - name: Migrations apply on Postgres (pgvector, HNSW)
+        env:
+          MLPAL_ENVIRONMENT: test
+          MLPAL_DB_HOST: localhost
+          MLPAL_DB_PORT: "5432"
+          MLPAL_DB_NAME: mlpal
+          MLPAL_DB_USER: postgres
+          MLPAL_DB_PASSWORD: localdev
+          MLPAL_DB_SCHEMA: memory
+        run: uv run alembic upgrade head
+      - name: Postgres suite
+        env:
+          MLPAL_DB_SCHEMA: ""
+          MLPAL_TEST_POSTGRES_DSN: postgresql+asyncpg://postgres:localdev@localhost:5432/mlpal
+        run: uv run pytest -m postgres tests/ -q
+
+  image:
+    # The quickstart is `docker compose up --build`; this proves the image (UI stage included)
+    # builds from a clean checkout on every change.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

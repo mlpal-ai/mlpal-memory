@@ -8,6 +8,9 @@ from .edge import Edge
 from .episode import Episode
 from .governance import ConsentState, ExtractionPolicy
 from .node import Node
+from .note import Note, NoteVersion
+from .hop import MemoryHop
+from .source import MemorySource, SourceItem
 from .watermark import MemoryWatermark
 
 __all__ = [
@@ -22,4 +25,9 @@ __all__ = [
     "ConsentState",
     "ExtractionPolicy",
     "MemoryWatermark",
+    "Note",
+    "NoteVersion",
+    "MemorySource",
+    "SourceItem",
+    "MemoryHop",
 ]

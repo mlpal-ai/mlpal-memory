@@ -22,7 +22,7 @@ from pathlib import Path
 
 import yaml
 
-from ..pipeline.hop_eval import run_ladder
+from ..pipeline.hop_eval import logging_runner, run_ladder
 from ..pipeline.hop_promote import decide_promotion
 
 
@@ -72,7 +72,9 @@ def main() -> int:
     args = ap.parse_args()
 
     if args.verb == "eval":
-        v = run_ladder(Path(args.hop), baseline_frontier=args.baseline_frontier).as_dict()
+        runner = logging_runner(Path(args.out).parent) if args.out else None
+        v = run_ladder(Path(args.hop), baseline_frontier=args.baseline_frontier,
+                       **({"runner": runner} if runner else {})).as_dict()
         text = json.dumps(v, indent=1)
         if args.out:
             Path(args.out).write_text(text)

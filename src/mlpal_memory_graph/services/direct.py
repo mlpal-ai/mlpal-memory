@@ -8,10 +8,14 @@ tenant/scope isolation apply identically to both tiers. See design-proposal §14
 
 from __future__ import annotations
 
+import re
+
 from dataclasses import dataclass
 
 from sqlalchemy import delete, or_, select
 
+from ..core.config import get_settings
+from ..core.logging import get_logger
 from ..core.scope import Scope, ScopeRef
 from ..db.models import Chunk, Document
 from ..db.scoping import classification_for, cosine, scope_clause
@@ -20,31 +24,177 @@ from .embeddings_client import get_embedder
 DEFAULT_CHUNK_CHARS = 1000
 
 
-def chunk_text(content: str, max_chars: int = DEFAULT_CHUNK_CHARS) -> list[str]:
-    """Split content into chunks on paragraph boundaries, capped at ``max_chars``.
+log = get_logger(__name__)
 
-    Deliberately simple and deterministic (no model call). A paragraph longer than the cap is
-    hard-split. Good enough for retrieval; smarter semantic chunking can swap in behind this.
+_USER_TURN = re.compile(r"(?im)^\s*(user|human)\s*:")
+
+
+def has_user_turn(content: str) -> bool:
+    """True when the passage contains a user/human turn (a line starting `user:`); transcripts are
+    `speaker: text` lines, so this is a line-anchored check, not a substring one."""
+    return bool(_USER_TURN.search(content or ""))
+
+
+# memory v8 C6 (LEARNINGS L30): a question about the assistant's own words — the answer is assistant text
+_ASKS_ASSISTANT = re.compile(
+    r"\b(you (told|said|mentioned|suggested|recommended|gave|shared|listed|explained|advised|described)"
+    r"|what did you\b|you'd (suggested|recommended|mentioned|said)"
+    r"|your (suggestions?|recommendations?|advice|tips?|explanation|answer)\b"
+    r"|(our|the) (previous |last |earlier |recent )?(conversation|chat|discussion)s? (about|on|regarding|where)\b"
+    r"|we (discussed|talked about|went over)\b)",
+    re.I,
+)
+
+
+def has_assistant_turn(content: str) -> bool:
+    """A chunk that carries no user turn: a `speaker: text` transcript is user and assistant turns
+    only, and a long assistant turn is chunked into continuation chunks that carry no speaker line
+    at all (memory v8 L32: that is where the assistant's answer usually sits), so the presence of an
+    `assistant:` line is not the test — the absence of a user line is."""
+    return not has_user_turn(content)
+
+
+def speaker_for_question(query: str | None) -> str:
+    """Which speaker's turns the question is about: "assistant" when it asks what the assistant said
+    or recommended, "user" otherwise (the user's own facts, preferences and events)."""
+    return "assistant" if query and _ASKS_ASSISTANT.search(query) else "user"
+
+
+def apply_user_turn_boost(fused: dict[str, float], content_of, factor: float, speaker: str = "user") -> dict[str, float]:
+    """memory v8 C1 (LEARNINGS L18): passages carrying the user's own words outrank assistant prose
+    of the same fused score by `factor`. `factor` 1.0 returns the input unchanged. C6 (L30):
+    `speaker="assistant"` boosts assistant turns instead, for a question about the assistant's words."""
+    if factor == 1.0:
+        return fused
+    has = has_assistant_turn if speaker == "assistant" else has_user_turn
+    return {cid: s * (factor if has(content_of(cid)) else 1.0) for cid, s in fused.items()}
+
+
+_ROLE_SPEAKERS = {"user", "human", "assistant", "ai", "bot"}
+_NAME_HEAD = re.compile(r"^[A-Z][a-z]+(?: [A-Z][a-z]+)?$")
+
+
+def split_turns(paragraph: str) -> list[tuple[str | None, list[str]]]:
+    """The turns of a `speaker: text` transcript as (speaker, lines). When the text has role prefixes
+    (user/assistant/…) only those start a turn; otherwise a capitalised name that recurs does. Any
+    other line — an assistant's `1. Online Reviews: …` list item, a `Note:` — continues the turn."""
+    lines = [ln for ln in paragraph.split("\n") if ln.strip()]
+    heads = [ln.split(":", 1)[0].strip() for ln in lines if ":" in ln]
+    role_mode = any(h.lower() in _ROLE_SPEAKERS for h in heads)
+    counts: dict[str, int] = {}
+    for h in heads:
+        if _NAME_HEAD.match(h):
+            counts[h] = counts.get(h, 0) + 1
+    names = {h for h, n in counts.items() if n >= 2}
+    turns: list[tuple[str | None, list[str]]] = []
+    for ln in lines:
+        head, sep, _ = ln.partition(":")
+        h = head.strip()
+        starts = bool(sep) and ((h.lower() in _ROLE_SPEAKERS) if role_mode else h in names)
+        if starts or not turns:
+            turns.append((h if starts else None, [ln]))
+        else:
+            turns[-1][1].append(ln)
+    return turns
+
+
+def _pack_turns(paragraph: str, max_chars: int) -> list[str]:
+    """memory v9 C2: whole turns packed up to the cap. A turn longer than the cap is cut into pieces
+    of whole lines (a single oversize line at the cap), and every continuation piece opens with
+    `speaker: (continued)` so it still says who is talking — the head-to-head misses sat in
+    continuation chunks of long assistant turns that carried no speaker at all (v8 L32)."""
+    chunks: list[str] = []
+    buf: list[str] = []
+    size = 0
+    for speaker, lines in split_turns(paragraph):
+        text = "\n".join(lines)
+        if len(text) <= max_chars:
+            if buf and size + len(text) + 1 > max_chars:
+                chunks.append("\n".join(buf)); buf, size = [], 0
+            buf.append(text); size += len(text) + 1
+            continue
+        if buf:
+            chunks.append("\n".join(buf)); buf, size = [], 0
+        prefix = f"{speaker}: (continued) " if speaker else ""
+        room = max(1, max_chars - len(prefix))
+        piece: list[str] = []
+        psize = 0
+        first = True
+        for ln in lines:
+            units = [ln] if len(ln) <= room else [ln[i : i + room] for i in range(0, len(ln), room)]
+            for u in units:
+                if piece and psize + len(u) + 1 > max_chars:
+                    chunks.append("\n".join(piece)); piece, psize, first = [], 0, False
+                if not piece and not first:
+                    u = prefix + u
+                piece.append(u); psize += len(u) + 1
+        if piece:
+            chunks.append("\n".join(piece))
+    if buf:
+        chunks.append("\n".join(buf))
+    return chunks
+
+
+def chunk_text(content: str, max_chars: int = DEFAULT_CHUNK_CHARS, overlap_lines: int | None = None) -> list[str]:
+    """Split content into chunks capped at ``max_chars``: on paragraph boundaries first, then on line
+    boundaries inside an oversize paragraph, hard-splitting only a single line longer than the cap.
+
+    Deterministic, no model call. memory v7 WP14: a conversation transcript is one paragraph of
+    ``speaker: text`` lines, and the old rule hard-split it every 1,000 characters mid-turn; the
+    LongMemEval-S misses were mostly inside a retrieved session, at those cuts. Lines are the unit
+    now, and ``overlap_lines`` (default from settings, 1) carries the last line(s) of a chunk into
+    the next so a turn and its reply stay retrievable together.
     """
     content = (content or "").strip()
     if not content:
         return []
+    settings = get_settings()
+    if overlap_lines is None:
+        overlap_lines = max(0, int(settings.chunk_overlap_lines))
+    mode = settings.chunk_mode or "paragraph"
+    line_aware = mode == "line"
     paragraphs = [p.strip() for p in content.split("\n\n") if p.strip()]
     chunks: list[str] = []
     current = ""
     for para in paragraphs:
-        if len(para) > max_chars:
-            if current:
+        if len(para) <= max_chars:
+            if current and len(current) + len(para) + 2 > max_chars:
                 chunks.append(current)
-                current = ""
+                current = para
+            else:
+                current = f"{current}\n\n{para}" if current else para
+            continue
+        if current:
+            chunks.append(current)
+            current = ""
+        if mode == "turn":
+            chunks.extend(_pack_turns(para, max_chars))
+            continue
+        if not line_aware:
+            # paragraph mode (the measured default): fixed-size cuts, every chunk carries the full cap
+            # of text; measured 0.850 vs 0.817 for line packing on LongMemEval-S 60 (two runs)
             for i in range(0, len(para), max_chars):
                 chunks.append(para[i : i + max_chars])
             continue
-        if current and len(current) + len(para) + 2 > max_chars:
-            chunks.append(current)
-            current = para
-        else:
-            current = f"{current}\n\n{para}" if current else para
+        # line mode: pack whole lines, overlapping the tail of one chunk into the next
+        lines = [ln for ln in para.split("\n") if ln.strip()]
+        buf: list[str] = []
+        size = 0
+        for ln in lines:
+            if len(ln) > max_chars:
+                if buf:
+                    chunks.append("\n".join(buf)); buf, size = [], 0
+                for i in range(0, len(ln), max_chars):
+                    chunks.append(ln[i : i + max_chars])
+                continue
+            if buf and size + len(ln) + 1 > max_chars:
+                chunks.append("\n".join(buf))
+                tail = buf[-overlap_lines:] if overlap_lines else []
+                tail = [t for t in tail if len(t) + len(ln) + 1 <= max_chars]
+                buf = list(tail); size = sum(len(t) + 1 for t in buf)
+            buf.append(ln); size += len(ln) + 1
+        if buf:
+            chunks.append("\n".join(buf))
     if current:
         chunks.append(current)
     return chunks
@@ -111,6 +261,9 @@ class DirectMemory:
         valid_at=None,  # bitemporal event-time (when the content was true/written)
     ) -> Document | None:
         """Store ``content`` verbatim as a Document + embedded Chunks. Returns None if empty."""
+        import time as _time
+
+        t0 = _time.monotonic()
         chunks = chunk_text(content)
         if not chunks:
             return None
@@ -131,7 +284,9 @@ class DirectMemory:
         )
         session.add(doc)
         await session.flush()
+        t1 = _time.monotonic()
         embeddings = await self.embedder.embed(chunks)
+        t2 = _time.monotonic()
         for i, (text, emb) in enumerate(zip(chunks, embeddings, strict=False)):
             session.add(
                 Chunk(
@@ -151,6 +306,9 @@ class DirectMemory:
                 )
             )
         await session.flush()
+        # memory v7 WP14: where ingest spends its time (chunk, embed, insert incl. the HNSW updates)
+        self.last_ingest_timings = {"chunks": len(chunks), "chunk_ms": int((t1 - t0) * 1000),
+                                    "embed_ms": int((t2 - t1) * 1000), "insert_ms": int((_time.monotonic() - t2) * 1000)}
         return doc
 
     async def search(
@@ -166,6 +324,7 @@ class DirectMemory:
         legs: set[str] | None = None,
         as_of=None,
         as_of_mode: str = "valid",
+        per_document: int = 1,
     ) -> list[ChunkHit]:
         """Retrieve passages across the accessible scopes only (hard scope predicate).
 
@@ -204,8 +363,28 @@ class DirectMemory:
         # (vector-only == a naive-RAG baseline; lexical-only == FTS baseline)
         legs = legs or {"vector", "lexical"}
         overfetch = max(limit * 3, 30)
-        embedding = await self.embedder.embed_one(query) if "vector" in legs else None
+        import time as _time
+
+        timings: dict[str, int] = {}
+        degraded: list[str] = []
+        _t0 = _time.monotonic()
+        embedding = None
+        if "vector" in legs:
+            try:
+                embedding = await self.embedder.embed_one(query)
+            except Exception as exc:  # noqa: BLE001 — memory v9 round 3: the embedder is a dependency, not the answer
+                # lexical-only is a worse page than a hybrid one but a page; the response says so
+                # (`degraded: ["vector"]`), the log and the counter say how often
+                from .metrics import REGISTRY as _registry
+
+                legs = set(legs) - {"vector"}
+                degraded.append("vector")
+                _registry.inc("search_degraded", tier="direct", leg="vector")
+                log.warning("search.degraded", tier="direct", leg="vector", error=str(exc)[:160])
+        timings["direct_embed_ms"] = int((_time.monotonic() - _t0) * 1000)
+        self.last_degraded = degraded
         by_id: dict[str, Chunk] = {}
+        _t0 = _time.monotonic()
 
         # -- semantic leg --
         if "vector" not in legs:
@@ -234,6 +413,8 @@ class DirectMemory:
             )[:overfetch]
         for c, _ in semantic:
             by_id[str(c.id)] = c
+        timings["direct_vector_ms"] = int((_time.monotonic() - _t0) * 1000)
+        _t0 = _time.monotonic()
 
         # -- lexical leg: term-based full-text ranking, NOT whole-query phrase matching.
         # (The eval caught this: an ILIKE on the full question matches nothing for
@@ -268,11 +449,13 @@ class DirectMemory:
                 # dfs come from ONE filtered-aggregate scan, cached per (tenant, term) —
                 # document frequencies drift slowly; interactive agents repeat domain
                 # terms constantly.
-                term_tsqs = {t: func.to_tsquery("english", t) for t in terms}
+                term_tsqs = {tm: func.to_tsquery("english", tm) for tm in terms}
                 idf = await self._idf_for(session, tenant_id, terms, base, tsv, term_tsqs)
+                timings["direct_idf_ms"] = int((_time.monotonic() - _t0) * 1000)
+                _t0 = _time.monotonic()
                 score_expr = None
-                for t in terms:
-                    term_score = case((tsv.op("@@")(term_tsqs[t]), idf[t]), else_=0.0)
+                for tm in terms:
+                    term_score = case((tsv.op("@@")(term_tsqs[tm]), idf[tm]), else_=0.0)
                     score_expr = term_score if score_expr is None else score_expr + term_score
                 any_tsq = func.to_tsquery("english", " | ".join(terms))
                 lex_stmt = (
@@ -303,6 +486,8 @@ class DirectMemory:
             lexical = [c for c, _ in scored_lex[:lex_overfetch]]
         for c in lexical:
             by_id[str(c.id)] = c
+        timings["direct_lexical_ms"] = int((_time.monotonic() - _t0) * 1000)
+        _t0 = _time.monotonic()
 
         # -- title leg: document-level signal the chunk legs structurally lack --
         # x5 round 4 measured ranking dilution as the corpus grew: chunks match on
@@ -355,6 +540,9 @@ class DirectMemory:
                 for c in title_chunks:
                     by_id[str(c.id)] = c
 
+        timings["direct_title_ms"] = int((_time.monotonic() - _t0) * 1000)
+        self.last_timings = timings
+
         # -- weighted RRF fusion --
         # A known-weak vector signal (dev-hash embedder) must not dilute the lexical leg
         # 1:1 (eval runs 182214→183737 measured exactly that dilution). Semantic
@@ -377,16 +565,23 @@ class DirectMemory:
                 cid: s * (1.4 if by_id[cid].workspace == workspace else 1.0)
                 for cid, s in fused.items()
             }
-        # per-document diversity: one (best) chunk per document in the final page — five
-        # chunks of one session transcript is one answer, not five.
+        settings = get_settings()
+        speaker = speaker_for_question(query) if settings.direct_speaker_boost_mode == "question" else "user"
+        fused = apply_user_turn_boost(fused, lambda cid: by_id[cid].content, float(settings.direct_user_turn_boost), speaker)
+        # per-document diversity: at most `per_document` chunks per document in the final page.
+        # One is right for a curated-docs corpus (five chunks of one runbook is one answer);
+        # a conversation memory is different — a long session holds several relevant turns,
+        # and the benchmark harness (memory v7 WP12) measured recall capped by this very
+        # rule (three sessions → three passages). Callers choose; the default stays one.
         ranked = sorted(fused.items(), key=lambda kv: kv[1], reverse=True)
         out: list[ChunkHit] = []
-        seen_docs: set[str] = set()
+        per_doc: dict[str, int] = {}
+        cap = max(1, int(per_document))
         for cid, score in ranked:
             chunk = by_id[cid]
-            if chunk.document_id in seen_docs:
+            if per_doc.get(chunk.document_id, 0) >= cap:
                 continue
-            seen_docs.add(chunk.document_id)
+            per_doc[chunk.document_id] = per_doc.get(chunk.document_id, 0) + 1
             out.append(ChunkHit(chunk, score))
             if len(out) >= limit:
                 break

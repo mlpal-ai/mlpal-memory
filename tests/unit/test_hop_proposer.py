@@ -34,7 +34,7 @@ def test_routing_proposal_cheaper_tier_within_margin():
     ps = propose(facts)
     assert len(ps) == 1 and ps[0].kind == "route"
     assert ps[0].change["from"] == "frontier" and ps[0].change["to"] == "cheap"
-    assert ps[0].knob == ""  # no routing.tier field exists — classify() will say so
+    assert ps[0].knob == "model.main"  # hop-v1.1 §8: the main-loop tier is a declared knob
     assert "not graded correctness" in ps[0].rationale  # completion != correctness, stated
     assert set(ps[0].evidence) == {"memory://node/rc", "memory://node/rf"}
     # beyond the margin: silence
@@ -93,7 +93,8 @@ def test_classify_against_joint_memx_surface():
     ps = classify(propose(facts), JOINT_MEMX_TUNABLE, JOINT_MEMX_LOCKED)
     app = {p.kind + ":" + p.knob: p.applicability for p in ps}
     assert app["budget:budgets.maxTurns"] == "blocked_locked"
-    assert app["route:"] == "no_declared_knob"
+    # x12's surface (hop-v1.0) declared no model.main: the knob now exists but is not tunable there
+    assert app["route:model.main"] == "not_tunable"
     assert app["waste:"] == "no_declared_knob"
     assert app["waste:verification.agent.riskGateMinChangedLines"] == "enactable"
     assert app["verification:verification.antiChurn.threshold"] == "enactable"
@@ -122,3 +123,46 @@ def test_routing_tie_surfaces_cheaper_tier():
     ]
     ps = propose(facts)
     assert len(ps) == 1 and ps[0].change == {"from": "frontier", "to": "cheap", "scope_note": "class jm"}
+
+
+def test_enum_set_range_classifies_model_main():
+    from mlpal_memory_graph.pipeline.hop_proposer import Proposal, classify
+    from mlpal_memory_graph.tools.hop_propose import _parse_tunable
+    surface = _parse_tunable("model.main=frontier|max,budgets.maxTurns=10:80")
+    assert surface["model.main"] == frozenset({"frontier", "max"}) and surface["budgets.maxTurns"] == (10.0, 80.0)
+    ok = Proposal(hop="infra", kind="route", knob="model.main", change={"from": "frontier", "to": "max"},
+                  rationale="r", predicted="p", evidence=["memory://node/x"])
+    bad = Proposal(hop="infra", kind="route", knob="model.main", change={"from": "frontier", "to": "cheap"},
+                   rationale="r", predicted="p", evidence=["memory://node/x"])
+    out = classify([ok, bad], surface, set())
+    assert out[0].applicability == "enactable" and out[1].applicability == "not_tunable"
+
+
+
+def test_deviation_fact_becomes_an_advisory_eval_proposal():
+    ps = propose([_f("hop:infra|deviation|unmodelled", "2 in window", nid="d1")])
+    assert len(ps) == 1 and ps[0].kind == "eval" and ps[0].knob == ""
+    assert ps[0].change == {"op": "author_case", "deviation": "unmodelled", "count": 2}
+    assert ps[0].evidence == ["memory://node/d1"]
+    classify(ps, tunable={"budgets.maxTurns": (10, 200)}, locked=set())
+    assert ps[0].applicability == "advisory"          # never enacted by the candidate builder
+
+
+# ---- memory v10: prompt facts become advisory proposals
+
+def test_memory_bypass_and_silent_are_advisory_prompt_proposals():
+    assert propose([_f("hop:infra|memory-bypass|watch", "5/30")]) == []          # 17 % < 50 %
+    ps = propose([_f("hop:infra|memory-bypass|watch", "24/30", nid="b1"), _f("hop:infra|silent|watch", "9/30", nid="s1")])
+    assert [p.kind for p in ps] == ["memory", "memory"] and all(p.knob == "" for p in ps)
+    assert ps[0].change["op"] == "prompt" and ps[0].evidence == ["memory://node/b1"]
+    out = classify(ps, tunable={"budgets.maxTurns": (60, 300)}, locked={"permissions.defaultMode"})
+    assert all(p.applicability == "advisory" for p in out)
+
+
+def test_unused_capability_is_an_advisory_module_off_proposal():
+    assert propose([_f("hop:infra|capability|watch|aws", "300/318")]) == []
+    ps = propose([_f("hop:infra|capability|watch|gcloud", "2/318", nid="c1")])
+    assert len(ps) == 1 and ps[0].kind == "capability" and ps[0].knob == "modules.gcloud.enabled" and ps[0].change["to"] == "off"
+    assert classify(ps, tunable={}, locked=set())[0].applicability == "advisory"
+    ps = propose([_f("hop:infra|capability|watch|gcloud", "2/318", nid="c1")])
+    assert classify(ps, tunable={"modules.gcloud.enabled": frozenset({"on", "off"})}, locked=set())[0].applicability == "enactable"

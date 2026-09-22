@@ -1,0 +1,127 @@
+{
+ "bench": "longmemeval",
+ "split": "s",
+ "arm": "direct",
+ "reader": "claude-sonnet-5",
+ "judge": "claude-sonnet-5",
+ "topk": 20,
+ "per_document": 8,
+ "context_token_budget": 6000,
+ "context_source": "passages",
+ "reader_prompt_version": "v2-dated-preferences",
+ "org_tag": null,
+ "judge_note": "official LongMemEval judge is gpt-4o-2024-08-06; this run used the gateway model named in `judge`",
+ "n": 15,
+ "scored": 15,
+ "errors": 0,
+ "accuracy": 0.8,
+ "recall@5": 0.0,
+ "recall@15": 0.0,
+ "context_tokens": {
+  "mean": 5779.0,
+  "p95": 5918
+ },
+ "search_ms": {
+  "p50": 324,
+  "p95": 437
+ },
+ "answer_ms": {
+  "p50": 3855,
+  "p95": 5619
+ },
+ "search_stage_ms_mean": {
+  "derived_ms": null,
+  "direct_ms": null,
+  "direct_embed_ms": null,
+  "direct_vector_ms": null,
+  "direct_idf_ms": null,
+  "direct_lexical_ms": null,
+  "direct_title_ms": null
+ },
+ "ingest_stage_ms": {
+  "chunks": 0,
+  "chunk_ms": 0,
+  "embed_ms": 0,
+  "insert_ms": 0,
+  "direct_ms": 0,
+  "derived_ms": 0
+ },
+ "ingest": {
+  "docs": 710,
+  "chars": 7361094,
+  "ms": 9057543,
+  "chars_per_s": 813
+ },
+ "by_type": {
+  "knowledge-update": {
+   "n": 3,
+   "accuracy": 1.0,
+   "recall@5": 0.0,
+   "recall@15": 0.0
+  },
+  "multi-session": {
+   "n": 3,
+   "accuracy": 0.333,
+   "recall@5": 0.0,
+   "recall@15": 0.0
+  },
+  "single-session-preference": {
+   "n": 3,
+   "accuracy": 0.667,
+   "recall@5": 0.0,
+   "recall@15": 0.0
+  },
+  "single-session-user": {
+   "n": 3,
+   "accuracy": 1.0,
+   "recall@5": 0.0,
+   "recall@15": 0.0
+  },
+  "temporal-reasoning": {
+   "n": 3,
+   "accuracy": 1.0,
+   "recall@5": 0.0,
+   "recall@15": 0.0
+  }
+ },
+ "model_usage": {
+  "claude-sonnet-5": {
+   "input": 134139,
+   "output": 3799,
+   "calls": 30,
+   "compute_units": 0.0306268,
+   "latency_ms": 82950
+  }
+ },
+ "cost_usd_estimate": 0.4594,
+ "system": "memobase",
+ "system_usage": {
+  "ingest": {
+   "llm_calls": 2037,
+   "llm_input_tokens": 5663971,
+   "llm_output_tokens": 895902,
+   "embed_calls": 1194,
+   "embed_tokens": 475799
+  },
+  "search": {
+   "llm_calls": 0,
+   "llm_input_tokens": 0,
+   "llm_output_tokens": 0,
+   "embed_calls": 15,
+   "embed_tokens": 246
+  },
+  "items_created": 1563,
+  "ingest_errors": 0,
+  "ingest_usd_estimate": 10.153,
+  "search_usd_estimate": 0.0
+ },
+ "wall_s": 9148.5,
+ "service": "http://localhost:8000",
+ "at": "2026-09-20T04:37:23.626798+00:00",
+ "ingest_usd_cap": {
+  "cap": 10.0,
+  "spent_this_run": 10.153,
+  "hit": true,
+  "haystacks_skipped": 3
+ }
+}

@@ -1,0 +1,8 @@
+{
+ "write-time LLM": "claude-haiku-4-5-20251001 via the Anthropic key (mem0's extraction and add/update/delete decisions); unavoidable",
+ "embedder": "text-embedding-3-small via the OpenAI key",
+ "vector store": "embedded Qdrant under the run directory",
+ "item": "mem0 memory sentence; session date and id from the metadata we attach on add",
+ "ingest unit": "one Memory.add per session with the session's chat messages, prefixed by a one-line session date",
+ "search": "top_k=k, threshold=0 (mem0 default 0.1 lifted)"
+}

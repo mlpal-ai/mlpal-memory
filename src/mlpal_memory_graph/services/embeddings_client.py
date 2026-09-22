@@ -56,6 +56,7 @@ class AssistantsEmbedder(Embedder):
         self.dim = dim
         self.quality = "semantic"
         self.api_key = api_key
+        self._transport: httpx.AsyncBaseTransport | None = None  # tests inject a MockTransport
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
         headers = {"Content-Type": "application/json"}
@@ -65,15 +66,26 @@ class AssistantsEmbedder(Embedder):
         elif self.api_key:
             # in-cluster service-to-service path
             headers["X-Internal-Service-Key"] = self.api_key
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
-                f"{self.base_url}/v1/embeddings",
-                json={"model": self.model, "input": texts},
-                headers=headers,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-        return [item["embedding"] for item in data["data"]]
+        from ..core.config import get_settings
+        from .resilience import breaker_for, with_retries
+
+        s = get_settings()
+
+        async def _call() -> list[list[float]]:
+            async with httpx.AsyncClient(timeout=s.embeddings_timeout_s, transport=self._transport) as client:
+                resp = await client.post(
+                    f"{self.base_url}/v1/embeddings",
+                    json={"model": self.model, "input": texts},
+                    headers=headers,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+            return [item["embedding"] for item in data["data"]]
+
+        # memory v9 round 3: bounded retries with backoff, a breaker that fails fast during an outage;
+        # the caller gets a typed ModelUnavailable and decides how to degrade
+        return await with_retries("embeddings", _call, attempts=s.model_retry_attempts,
+                                  breaker=breaker_for("embeddings", s.model_breaker_failures, s.model_breaker_open_s))
 
 
 class LocalEmbedder(Embedder):
@@ -97,11 +109,14 @@ class LocalEmbedder(Embedder):
             from fastembed import TextEmbedding  # optional dep: mlpal-memory[local-embeddings]
 
             # intra-op ONNX threads (NOT fastembed's `parallel` multiprocessing, which
-            # deadlocks under a thread executor on macOS). Default is conservative;
-            # all-cores makes bulk re-embeds ~cores× faster and is harmless per-query.
-            self._engine = TextEmbedding(self.model, threads=os.cpu_count())
+            # deadlocks under a thread executor on macOS). memory v7 WP14: measured in the
+            # container — 4 threads and batches of 16 beat all-cores and large batches, and
+            # concurrent callers must not each spin up a full thread pool.
+            s = get_settings()
+            self._engine = TextEmbedding(self.model, threads=max(1, int(s.embeddings_threads or os.cpu_count() or 1)))
+            self._batch = max(1, int(s.embeddings_batch_size or 16))
         out: list[list[float]] = []
-        for vec in self._engine.embed(texts):
+        for vec in self._engine.embed(texts, batch_size=self._batch):
             v = list(map(float, vec))
             if len(v) < self.dim:
                 v = v + [0.0] * (self.dim - len(v))
@@ -111,7 +126,16 @@ class LocalEmbedder(Embedder):
     async def embed(self, texts: list[str]) -> list[list[float]]:
         import asyncio
 
-        return await asyncio.to_thread(self._embed_sync, texts)
+        # one BATCH at a time: the ONNX session is CPU-bound and two ingests at once oversubscribe
+        # the cores (measured 20 → 5 chunks/s). A single-text embed (a query) does not queue behind
+        # the ingest batches: a read must not wait for a write (measured 8 s search p50 while a
+        # 50-session haystack was being ingested).
+        if len(texts) <= 1:
+            return await asyncio.to_thread(self._embed_sync, texts)
+        if not hasattr(self, "_gate"):
+            self._gate = asyncio.Semaphore(max(1, int(get_settings().embeddings_concurrency or 1)))
+        async with self._gate:
+            return await asyncio.to_thread(self._embed_sync, texts)
 
 
 @lru_cache

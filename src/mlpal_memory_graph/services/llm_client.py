@@ -39,16 +39,23 @@ class LLMClient(ABC):
 
 class GatewayLLMClient(LLMClient):
     def __init__(
-        self, base_url: str, model: str, api_key: str | None = None, max_tokens: int = 1500
+        self, base_url: str, model: str, api_key: str | None = None, max_tokens: int = 1500,
+        provider: str = "gateway",
     ):
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.name = model
         self.api_key = api_key
         self.max_tokens = max_tokens
+        self.provider = provider
+        self._transport: httpx.AsyncBaseTransport | None = None  # tests inject a MockTransport
 
     def _headers(self) -> dict[str, str]:
         headers = {"Content-Type": "application/json"}
+        if self.provider == "openai-compatible":
+            if self.api_key:
+                headers["Authorization"] = f"Bearer {self.api_key}"
+            return headers
         if self.api_key and self.api_key.startswith("mlpal_"):
             headers["Authorization"] = f"Bearer {self.api_key}"  # public gateway key
         elif self.api_key:
@@ -65,13 +72,26 @@ class GatewayLLMClient(LLMClient):
             "max_tokens": max_tokens or self.max_tokens,
             "temperature": 0,
         }
-        async with httpx.AsyncClient(timeout=60) as client:
-            r = await client.post(
-                f"{self.base_url}/v1/chat/completions", json=body, headers=self._headers()
-            )
-            r.raise_for_status()
-            data = r.json()
+        data = await self._post(body, self._headers())
         return str(data.get("content") or ""), dict(data.get("usage") or {})
+
+    async def _post(self, body: dict, headers: dict) -> dict:
+        """One chat completion through the gateway with memory v9 round-3 resilience: bounded
+        retries with backoff on timeout / 429 / 5xx and a breaker that fails fast during an outage.
+        Raises ModelUnavailable; the fold treats that as "defer", never as a bad extraction."""
+        from ..core.config import get_settings
+        from .resilience import breaker_for, with_retries
+
+        s = get_settings()
+
+        async def _call() -> dict:
+            async with httpx.AsyncClient(timeout=s.llm_timeout_s, transport=self._transport) as client:
+                r = await client.post(f"{self.base_url}/v1/chat/completions", json=body, headers=headers)
+                r.raise_for_status()
+                return r.json()
+
+        return await with_retries("llm", _call, attempts=s.model_retry_attempts,
+                                  breaker=breaker_for("llm", s.model_breaker_failures, s.model_breaker_open_s))
 
     async def complete_json(self, *, system, user, schema, max_tokens=None) -> dict:
         headers = self._headers()
@@ -88,12 +108,7 @@ class GatewayLLMClient(LLMClient):
                 "json_schema": {"name": "extraction", "schema": schema, "strict": True},
             },
         }
-        async with httpx.AsyncClient(timeout=60) as client:
-            r = await client.post(
-                f"{self.base_url}/v1/chat/completions", json=body, headers=headers
-            )
-            r.raise_for_status()
-            data = r.json()
+        data = await self._post(body, headers)
         # the gateway returns parsed structured output in `data`; otherwise parse `content`.
         if isinstance(data.get("data"), dict):
             return data["data"]
@@ -104,11 +119,32 @@ class GatewayLLMClient(LLMClient):
             return {}
 
 
+def llm_backend() -> str:
+    """Which LLM backend the model-tier pipeline stages use: ``gateway`` or ``dev`` (the offline
+    stubs). memory v7 WP14: the stubs used to be chosen whenever dev auth or a local environment was
+    on, so `MLPAL_EXTRACTOR=llm` on the compose stack ran the stub and produced nothing, silently
+    (found by the benchmark's LLM arm: 0 facts, 6 ms per document). Now: `llm_mode=gateway|dev`
+    decides; `auto` (default) picks the gateway whenever a key is configured and says which."""
+    s = get_settings()
+    mode = (s.llm_mode or "auto").lower()
+    if mode in ("gateway", "dev"):
+        return mode
+    key = s.llm_api_key or (s.internal_service_api_key if not s.dev_auth else "")
+    chosen = "gateway" if key else "dev"
+    if not getattr(llm_backend, "_logged", False):
+        log.info("llm.backend", backend=chosen, mode=mode, key_configured=bool(key), dev_auth=s.dev_auth, environment=s.environment)
+        llm_backend._logged = True  # type: ignore[attr-defined]
+    return chosen
+
+
 @lru_cache
 def get_llm_client() -> LLMClient:
     s = get_settings()
+    if s.llm_provider == "openai-compatible":
+        return GatewayLLMClient(s.llm_base_url or "http://localhost:11434", s.llm_model, s.llm_api_key or None,
+                                s.llm_max_tokens, provider="openai-compatible")
     return GatewayLLMClient(
-        s.embeddings_service_url,
+        s.llm_base_url or s.embeddings_service_url,
         s.llm_model,
         s.llm_api_key or s.internal_service_api_key,
         s.llm_max_tokens,

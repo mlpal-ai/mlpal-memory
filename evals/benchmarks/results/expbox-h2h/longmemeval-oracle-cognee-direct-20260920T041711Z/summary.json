@@ -1,0 +1,109 @@
+{
+ "bench": "longmemeval",
+ "split": "oracle",
+ "arm": "direct",
+ "reader": "claude-sonnet-5",
+ "judge": "claude-sonnet-5",
+ "topk": 20,
+ "per_document": 8,
+ "context_token_budget": 6000,
+ "context_source": "passages",
+ "reader_prompt_version": "v2-dated-preferences",
+ "org_tag": null,
+ "judge_note": "official LongMemEval judge is gpt-4o-2024-08-06; this run used the gateway model named in `judge`",
+ "n": 21,
+ "scored": 21,
+ "errors": 0,
+ "accuracy": 0.81,
+ "recall@5": 0.956,
+ "recall@15": 0.956,
+ "context_tokens": {
+  "mean": 5826.238,
+  "p95": 5995
+ },
+ "search_ms": {
+  "p50": 2309,
+  "p95": 2765
+ },
+ "answer_ms": {
+  "p50": 3088,
+  "p95": 4752
+ },
+ "search_stage_ms_mean": {
+  "derived_ms": null,
+  "direct_ms": null,
+  "direct_embed_ms": null,
+  "direct_vector_ms": null,
+  "direct_idf_ms": null,
+  "direct_lexical_ms": null,
+  "direct_title_ms": null
+ },
+ "ingest_stage_ms": {
+  "chunks": 0,
+  "chunk_ms": 0,
+  "embed_ms": 0,
+  "insert_ms": 0,
+  "direct_ms": 0,
+  "derived_ms": 0
+ },
+ "ingest": {
+  "docs": 56,
+  "chars": 824238,
+  "ms": 515852,
+  "chars_per_s": 1598
+ },
+ "by_type": {
+  "multi-session": {
+   "n": 5,
+   "accuracy": 0.4,
+   "recall@5": 0.95,
+   "recall@15": 0.95
+  },
+  "temporal-reasoning": {
+   "n": 16,
+   "accuracy": 0.938,
+   "recall@5": 0.958,
+   "recall@15": 0.958
+  }
+ },
+ "model_usage": {
+  "claude-sonnet-5": {
+   "input": 191888,
+   "output": 4164,
+   "calls": 43,
+   "compute_units": 0.0425416,
+   "latency_ms": 104511
+  }
+ },
+ "cost_usd_estimate": 0.6381,
+ "system": "cognee",
+ "system_usage": {
+  "ingest": {
+   "llm_calls": 2893,
+   "llm_input_tokens": 2889006,
+   "llm_output_tokens": 1069402,
+   "embed_calls": 2368,
+   "embed_tokens": 803609
+  },
+  "search": {
+   "llm_calls": 0,
+   "llm_input_tokens": 0,
+   "llm_output_tokens": 0,
+   "embed_calls": 84,
+   "embed_tokens": 784
+  },
+  "items_created": 0,
+  "ingest_errors": 0,
+  "ingest_usd_estimate": 8.2521,
+  "search_usd_estimate": 0.0
+ },
+ "wall_s": 671.7,
+ "service": "http://localhost:8000",
+ "at": "2026-09-20T04:28:27.295139+00:00",
+ "ingest_usd_cap": {
+  "cap": 8.0,
+  "spent_this_run": 8.2519,
+  "hit": true,
+  "haystacks_skipped": 75
+ }
+}

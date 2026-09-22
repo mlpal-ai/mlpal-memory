@@ -25,4 +25,29 @@ async def fold_gate(session, tenant_id: str | None, scope: ScopeRef, episode) ->
         return f"consent:{state}"
 
     policy = await resolve_extraction_policy(session, tenant_id, scope)
-    return policy.drop_reason(source=episode.source, metadata=_episode_metadata(episode))
+    reason = policy.drop_reason(source=episode.source, metadata=_episode_metadata(episode))
+    if reason is not None:
+        return reason
+    # memory v7 WP4 (design §9): documents are admitted by salience and budget, never by size.
+    # Claims and telemetry are never salience-gated: they are small and already governed.
+    if episode.action_type == "document.ingested" and episode.content and (policy.min_salience is not None or policy.source_budget_per_day):
+        from ..services.salience import admission_reason
+
+        reason, rec = await admission_reason(session, tenant_id, source=episode.source, text=episode.content,
+                                             valid_at=episode.occurred_at, min_salience=policy.min_salience,
+                                             budget_per_day=policy.budget_for(episode.source))
+        payload = dict(episode.payload or {})
+        payload["salience"] = rec
+        episode.payload = payload
+        if reason is not None:
+            return reason
+    # memory v6 lift rule (DESIGN §5): a claim that names a person beyond a role never lands above the
+    # person tier. Below the person tier it is theirs and stays. Deterministic patterns; a person
+    # reviews anything the patterns cannot judge (names) at lift time.
+    if episode.action_type == "memory.claim" and scope.scope.value != "user":
+        from ..services.pii import classify_pii
+
+        kinds = classify_pii(episode.content) or classify_pii(str((episode.payload or {}).get("value") or ""))
+        if kinds:
+            return "pii:" + "+".join(kinds)
+    return None

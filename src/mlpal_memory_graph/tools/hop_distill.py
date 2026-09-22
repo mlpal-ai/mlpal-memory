@@ -21,18 +21,44 @@ import asyncio
 import sys
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 
 from ..core.scope import Scope, ScopeRef
 from ..db import get_session_factory
 from ..db.models import Episode
 from ..graph import get_driver
-from ..pipeline.hop_distiller import distill_runs
+from ..pipeline.hop_distiller import distill_deviations, distill_runs
+from ..pipeline.hop_names import contract_at_least, hop_base
+
+
+def apply_hop_alias(payload: dict, aliases: dict[str, str] | None) -> dict:
+    """A variant's runs count toward its parent HOP: `infra-ro=infra` rewrites the payload's hop name
+    and keeps the variant in `hop.variant`. Pure; the input dict is not mutated."""
+    if not aliases:
+        return payload
+    name = (payload.get("hop") or {}).get("name")
+    if name not in aliases:
+        return payload
+    return {**payload, "hop": {**payload["hop"], "name": aliases[name], "variant": name}}
+
+
+async def _last_turn_at(session, org: str, hop: str | None):
+    """The last scored tune turn for the HOP in `org` (the ledger `tune_turn` writes), or None."""
+    rows = (await session.execute(
+        select(Episode.occurred_at, Episode.payload)
+        .where(Episode.org_id == org, Episode.source == "harness_telemetry", Episode.action_type == "hop.eval_scored")
+        .order_by(Episode.occurred_at.desc())
+    )).all()
+    for occurred, payload in rows:
+        if hop is None or hop_base(((payload or {}).get("hop") or {}).get("name")) == hop_base(hop):
+            return occurred
+    return None
 
 
 async def _distill(
     org: str, hop: str | None, window_days: int, wipe: bool,
     read_orgs: list[str] | None = None, drop_earliest: int = 0,
+    hop_aliases: dict[str, str] | None = None, since_last_turn: bool = False,
 ) -> None:
     """``org`` is where facts are WRITTEN; ``read_orgs`` (default [org]) are the
     tenants whose telemetry is aggregated — experiments keep arms in separate
@@ -44,6 +70,13 @@ async def _distill(
     since = datetime.now(UTC) - timedelta(days=window_days)
     sources = read_orgs or [org]
     async with factory() as session:
+        if since_last_turn:
+            # memory v10: the window a tune turn should read is everything since the last turn; the
+            # day count is the fallback for a HOP that has never been tuned
+            last = await _last_turn_at(session, org, hop)
+            if last is not None:
+                since = last if last.tzinfo else last.replace(tzinfo=UTC)
+                print(f"window: since the last scored turn at {since.isoformat()}")
         payloads: list[dict] = []
         total_rows = 0
         for src in sources:
@@ -69,14 +102,45 @@ async def _distill(
                 rows = rows[drop_earliest:]
                 for d in dropped:
                     print(f"  pilot-excluded {src}: {d.event_id} @ {d.occurred_at.isoformat()}")
-            payloads.extend(
-                r.payload for r in rows
-                if r.payload.get("contract") == "d11.2"
-                and (hop is None or (r.payload.get("hop") or {}).get("name") == hop)
-            )
-        print(f"{total_rows} telemetry episodes across {sources}, {len(payloads)} d11.2 in window "
+            for r in rows:
+                p = apply_hop_alias(r.payload, hop_aliases)
+                if not contract_at_least(p.get("contract")):
+                    continue
+                if hop is None or hop_base((p.get("hop") or {}).get("name")) == hop_base(hop):
+                    payloads.append(p)
+        print(f"{total_rows} telemetry episodes across {sources}, {len(payloads)} d11.2+ in window "
               f"({window_days}d{f', hop={hop}' if hop else ''}) -> writing to {org}")
         ents, edges = distill_runs(payloads)
+        # hop-v1.1 §9.2: deviation memories shipped by the harness (source harness_memory)
+        dev_payloads: list[dict] = []
+        for src in sources:
+            dev_rows = (
+                (
+                    await session.execute(
+                        select(Episode)
+                        .where(
+                            Episode.org_id == src,
+                            Episode.occurred_at >= since,
+                            or_(
+                                and_(Episode.source == "harness_memory", Episode.action_type == "deviation"),
+                                and_(Episode.action_type == "memory.claim", Episode.payload["kind"].as_string() == "deviation"),
+                            ),
+                        )
+                        .order_by(Episode.occurred_at)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            dev_payloads.extend(
+                r.payload for r in dev_rows
+                if hop is None or hop_base(str(r.payload.get("hop") or "").split("@", 1)[0]) == hop_base(hop)
+            )
+        if dev_payloads:
+            d_ents, d_edges = distill_deviations(dev_payloads)
+            print(f"{len(dev_payloads)} deviation memories in window -> {len(d_edges)} deviation fact(s)")
+            ents += d_ents
+            edges += d_edges
         if not edges:
             print("nothing cleared its floor — no facts written (silence, not weak claims)")
             return
@@ -130,7 +194,11 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--org", required=True)
     ap.add_argument("--hop", default=None)
+    ap.add_argument("--hop-alias", action="append", default=[], metavar="VARIANT=HOP",
+                    help="count a variant's runs toward a HOP (e.g. infra-ro=infra): the read-only twin of an artifact is the same HOP for tuning")
     ap.add_argument("--window-days", type=int, default=30)
+    ap.add_argument("--since-last-turn", action="store_true",
+                    help="read everything since the last scored tune turn in --org (the day window is the fallback)")
     ap.add_argument("--wipe", action="store_true")
     ap.add_argument("--orgs", default=None,
                     help="comma-separated source tenants to read (default: --org)")
@@ -141,6 +209,8 @@ def main() -> int:
         args.org, args.hop, args.window_days, args.wipe,
         read_orgs=args.orgs.split(",") if args.orgs else None,
         drop_earliest=args.drop_earliest,
+        hop_aliases=dict(a.split("=", 1) for a in args.hop_alias) if args.hop_alias else None,
+        since_last_turn=args.since_last_turn,
     ))
     return 0
 

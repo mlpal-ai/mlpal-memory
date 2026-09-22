@@ -33,6 +33,9 @@ class RetrievalContext:
     # v3: the active workspace facet ("me, in repo X") — focuses ranking inside the
     # personal store (facet-matching memories get a boost); never an authz filter.
     workspace: str | None = None
+    # memory v6 WP11: the HOP's topic contract as the host stamped it; None = unrestricted (legacy/person).
+    # Applies to keyed topics (nodes carrying props.topic); free-text and documents stay scope-governed.
+    topic_grant: object | None = None
 
 
 def accessible_scopes(ctx: RetrievalContext) -> list[ScopeRef]:

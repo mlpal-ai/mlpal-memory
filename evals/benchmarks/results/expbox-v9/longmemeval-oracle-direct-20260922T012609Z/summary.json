@@ -1,0 +1,108 @@
+{
+ "bench": "longmemeval",
+ "split": "oracle",
+ "arm": "direct",
+ "reader": "claude-sonnet-5",
+ "judge": "claude-sonnet-5",
+ "topk": 20,
+ "per_document": 8,
+ "context_token_budget": 6000,
+ "context_source": "packet",
+ "reader_prompt_version": "v2-dated-preferences",
+ "org_tag": null,
+ "judge_note": "official LongMemEval judge is gpt-4o-2024-08-06; this run used the gateway model named in `judge`",
+ "n": 96,
+ "scored": 96,
+ "errors": 0,
+ "accuracy": 0.885,
+ "recall@5": 0.996,
+ "recall@15": 0.996,
+ "context_tokens": {
+  "mean": 2785.948,
+  "p95": 4661
+ },
+ "search_ms": {
+  "p50": 77,
+  "p95": 98
+ },
+ "answer_ms": {
+  "p50": 3343,
+  "p95": 6185
+ },
+ "search_stage_ms_mean": {
+  "derived_ms": 22.021,
+  "direct_ms": 30.906,
+  "direct_embed_ms": 5.49,
+  "direct_vector_ms": 10.719,
+  "direct_idf_ms": 2.625,
+  "direct_lexical_ms": 7.802,
+  "direct_title_ms": 1.146
+ },
+ "ingest_stage_ms": {
+  "chunks": 3353,
+  "chunk_ms": 213,
+  "embed_ms": 160434,
+  "insert_ms": 6998,
+  "direct_ms": 167832,
+  "derived_ms": 810
+ },
+ "ingest": {
+  "docs": 171,
+  "chars": 2425274,
+  "ms": 99532,
+  "chars_per_s": 24367
+ },
+ "by_type": {
+  "knowledge-update": {
+   "n": 16,
+   "accuracy": 0.875,
+   "recall@5": 1.0,
+   "recall@15": 1.0
+  },
+  "multi-session": {
+   "n": 16,
+   "accuracy": 0.75,
+   "recall@5": 0.984,
+   "recall@15": 0.984
+  },
+  "single-session-assistant": {
+   "n": 16,
+   "accuracy": 0.938,
+   "recall@5": 1.0,
+   "recall@15": 1.0
+  },
+  "single-session-preference": {
+   "n": 16,
+   "accuracy": 0.875,
+   "recall@5": 1.0,
+   "recall@15": 1.0
+  },
+  "single-session-user": {
+   "n": 16,
+   "accuracy": 1.0,
+   "recall@5": 1.0,
+   "recall@15": 1.0
+  },
+  "temporal-reasoning": {
+   "n": 16,
+   "accuracy": 0.875,
+   "recall@5": 0.99,
+   "recall@15": 0.99
+  }
+ },
+ "model_usage": {
+  "claude-sonnet-5": {
+   "input": 480590,
+   "output": 18680,
+   "calls": 195,
+   "compute_units": 0.11479799999999994,
+   "latency_ms": 567102
+  }
+ },
+ "cost_usd_estimate": 1.722,
+ "system": "ours-raw",
+ "system_usage": null,
+ "wall_s": 688.0,
+ "service": "http://localhost:8000",
+ "at": "2026-09-22T01:37:37.972857+00:00"
+}

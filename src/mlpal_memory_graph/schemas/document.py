@@ -29,7 +29,10 @@ class DocumentIngestResponse(BaseModel):
     event_id: str
     scope: str
     scope_id: str | None
-    status: str  # "processed" | "consent_blocked" | "policy_dropped"
+    status: str  # "processed" | "consent_blocked" | "policy_dropped" | "declined" (salience/budget)
+    reason: str | None = None
+    salience: dict | None = None  # {recency, distinctiveness, score} when a floor is configured
+    timings_ms: dict | None = None  # ingest stages: chunks, chunk_ms, embed_ms, insert_ms, direct_ms, derived_ms
 
 
 class DocumentOut(BaseModel):

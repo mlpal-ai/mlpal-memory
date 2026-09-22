@@ -33,6 +33,9 @@ class PolicyRequest(BaseModel):
     deny_sources: list[str] = []
     allow_sources: list[str] | None = None
     metadata_deny: dict[str, list[str]] = {}
+    # memory v7 WP4 (design §9): documents are admitted by salience and a per-source daily budget
+    min_salience: float | None = None          # 0..1; None = no floor
+    source_budget_per_day: dict[str, int] = {}  # source name -> documents per UTC day; "*" = default
 
 
 class PolicyResponse(BaseModel):

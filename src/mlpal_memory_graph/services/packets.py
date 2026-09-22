@@ -21,6 +21,8 @@ bypass decay entirely (the past is exactly as true as it was).
 from __future__ import annotations
 
 import math
+
+from ..core.halflife import decay as _decay
 import re
 from datetime import UTC, datetime
 
@@ -62,6 +64,9 @@ def _fact_line(m) -> str:
         labels.append(node.status)
     if m.contested:
         labels.append("⚠ contested")
+    trust = (node.props or {}).get("trust") if isinstance(node.props, dict) else None
+    if trust and trust.get("tier"):
+        labels.append(f"trust:{trust['tier']}")
     label_str = " · ".join(labels)
     summary = f" — {node.summary}" if node.summary else ""
     return f"- [{node.name}](memory://node/{node.id}): {label_str}{summary}"
@@ -84,6 +89,19 @@ def _tokens(text: str) -> set[str]:
     return {t for t in re.findall(r"[a-z0-9.$/]+", text.lower()) if t not in _QUERY_STOP}
 
 
+_KEYED_GENERIC = {"infra", "state", "pref", "person", "watch"}
+
+
+def _keyed_tokens(text: str) -> set[str]:
+    """Segments of a keyed-state anchor ("infra/state/cost-daily/2026-09-15" -> cost, daily, 2026)
+    or of a query. Path/hyphen separators split; generic and short segments never count."""
+    return {
+        seg
+        for seg in re.split(r"[/:=\s\-]+", text.lower())
+        if len(seg) >= 3 and seg not in _KEYED_GENERIC and seg not in _QUERY_STOP
+    }
+
+
 def _leading_value_fact(query: str, facts: list, value_since: dict):
     """Highest-ranked CURRENT MetricValue fact whose anchor overlaps the query (>=2
     tokens), plus the valid-from of its live HAS_VALUE edge (``value_since`` maps
@@ -99,8 +117,16 @@ def _leading_value_fact(query: str, facts: list, value_since: dict):
         # "mlpal-docs status" outled "status page" on a status-page question)
         anchor = n.name.split("=", 1)[0].strip()
         anchor = anchor.removesuffix(" status")
-        overlap = len(qtok & _tokens(anchor))
-        if overlap >= 2 and overlap > best_overlap:
+        keyed = str(n.key).startswith(("state:", "pref:"))
+        if keyed:
+            # memory v6: one distinctive segment of the topic or key in the query is enough
+            # ("cost-daily", "hop-sandbox", a volume id); the ≥2 rule guards free-text anchors
+            overlap = len(_keyed_tokens(query) & _keyed_tokens(anchor))
+            needed = 1
+        else:
+            overlap = len(qtok & _tokens(anchor))
+            needed = 2
+        if overlap >= needed and overlap > best_overlap:
             best, best_overlap = m, overlap
     if best is not None:
         return best, _as_utc(value_since.get(best.node.id))
@@ -111,15 +137,16 @@ def _from_failed_run(chunk) -> bool:
     return bool(chunk.source) and chunk.source.endswith(FAILED_SOURCE_SUFFIX)
 
 
-def _passage_block(hit, doc_meta: dict, value_since: datetime | None = None) -> str:
+def _passage_block(hit, doc_meta: dict, value_since: datetime | None = None, excerpt_chars: int | None = None) -> str:
     chunk = hit.chunk
     meta = doc_meta.get(chunk.document_id, {})
     title = meta.get("title") or chunk.source or "passage"
     valid_at = _as_utc(meta.get("valid_at"))
     when = _date(meta.get("valid_at"))
     excerpt = " ".join(chunk.content.split())
-    if len(excerpt) > EXCERPT_CHARS:
-        excerpt = excerpt[:EXCERPT_CHARS].rsplit(" ", 1)[0] + " …"
+    cap = EXCERPT_CHARS if excerpt_chars is None else excerpt_chars
+    if cap and len(excerpt) > cap:
+        excerpt = excerpt[:cap].rsplit(" ", 1)[0] + " …"
     block = f'> "{excerpt}"\n> — [{title}](memory://chunk/{chunk.id}), {when}'
     if value_since is not None and valid_at is not None and valid_at < value_since:
         block += "\n> ⚠ predates the current value above — historical, not current truth."
@@ -141,6 +168,8 @@ def build_packet(
     workspace: str | None = None,
     agent_mode: bool = False,
     value_since: dict | None = None,
+    max_passages: int | None = None,   # memory v7 WP14: a conversation haystack needs more than five
+    excerpt_chars: int | None = None,  # None = the packet default; 0 = the whole chunk
 ) -> tuple[str, dict]:
     """Assemble the markdown packet + a structured summary (for the JSON envelope).
 
@@ -153,15 +182,20 @@ def build_packet(
     # x2 finding 3 (evidence pack §4b): insights distilled from FAILED runs are
     # hypotheses, not knowledge — memory amplifies mistakes at recall speed if they
     # present as Facts. They get their own labeled section and never lead the packet.
-    ranked_nodes = sorted(
-        resolution.nodes,
-        key=lambda m: (m.score, m.node.observed_count or 1),
-        reverse=True,
-    )
+    # memory v6 WP12: claim-derived facts decay by their kind's half-life (learning 1y, deviation
+    # 90d, a host-stamped override); state and preference never decay by clock (one current value).
+    # Untyped facts keep the v3 rule (no decay here). As-of reads skip decay: the past is not stale.
+    def _fact_rank(m):
+        props = m.node.props if isinstance(m.node.props, dict) else {}
+        d = 1.0 if as_of is not None or not props.get("kind") else _decay(
+            props, _as_utc(getattr(m.node, "updated_at", None)), now)
+        return (m.score * d, m.node.observed_count or 1)
+
+    ranked_nodes = sorted(resolution.nodes, key=_fact_rank, reverse=True)
     # superseded value-facts never appear as CURRENT facts (x6c: the one persistent
     # stale-served failure). As-of reads reconstruct them via edge validity instead.
     if as_of is None:
-        ranked_nodes = [m for m in ranked_nodes if m.node.status != "superseded"]
+        ranked_nodes = [m for m in ranked_nodes if m.node.status not in ("superseded", "retracted", "expired")]
     unverified = [
         m for m in ranked_nodes
         if (m.node.props or {}).get("hypothesis_from_failed_attempt")
@@ -186,14 +220,14 @@ def build_packet(
         # SUPPRESS failed-run content: no unverified hypotheses, no failed-run
         # evidence; negative knowledge appears only as one-line constraints.
         all_passages = [h for h in all_passages if not _from_failed_run(h.chunk)]
-    passages = all_passages[:MAX_PASSAGES]
+    passages = all_passages[: (max_passages or MAX_PASSAGES)]
     contested = [m for m in facts if m.contested]
 
     # x11: a current watched value that answers the query leads the packet;
     # as-of reads keep today's behavior (point-in-time truth has no "current").
-    value_lead, value_since_dt = (None, None) if as_of is not None else _leading_value_fact(
-        query, facts, value_since or {}
-    )
+    # as-of reads: the facts page already holds only values valid at T (node-follows-edge), so
+    # the same lead rule answers "what was it then" with the then-value, labelled as such
+    value_lead, value_since_dt = _leading_value_fact(query, facts, value_since or {})
     if value_lead is not None:
         facts.remove(value_lead)
         facts.insert(0, value_lead)
@@ -202,7 +236,11 @@ def build_packet(
     scope_note = f" · workspace `{workspace}`" if workspace else ""
     asof_note = f" · as of {_date(as_of)}" if as_of else ""
 
-    if value_lead is not None:
+    if value_lead is not None and as_of is not None:
+        lines.append(
+            f"> {value_lead.node.name} (value as of {_date(as_of)}; it may have been superseded since)."
+        )
+    elif value_lead is not None:
         since_note = (
             f" (current since {_date(value_since_dt)})" if value_since_dt else " (current value)"
         )
@@ -230,7 +268,7 @@ def build_packet(
 
     if passages:
         lines.append("\n## Evidence")
-        lines.extend(_passage_block(h, doc_meta, value_since_dt) for h in passages)
+        lines.extend(_passage_block(h, doc_meta, value_since_dt, excerpt_chars) for h in passages)
 
     if contested:
         lines.append("\n## Contested")

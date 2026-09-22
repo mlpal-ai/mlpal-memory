@@ -24,6 +24,7 @@ from __future__ import annotations
 import hashlib
 import re
 import statistics
+import os
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -49,6 +50,7 @@ class SuiteResult:
     score: float | None = None
     passed: bool | None = None       # gating suites only
     skipped: bool = False
+    skip_reason: str | None = None
 
     def as_dict(self) -> dict:
         return {
@@ -76,11 +78,40 @@ class Verdict:
         }
 
 
+# The HOP directory the ladder is grading; every scorer sees it as $HOP_DIR (hop-v1.1 §6: a scorer
+# that resolves the HOP by name would grade the installed version, never the candidate).
+_CURRENT_HOP_DIR: Path | None = None
+
 Runner = Callable[[str, Path], tuple[int, str]]  # (scorer cmd, cwd) -> (returncode, stdout)
 
 
+def logging_runner(log_dir: Path) -> Runner:
+    """A shell runner that also keeps every scorer's stdout+stderr in `log_dir/scorer-<n>.log`.
+    A scorer that fails silently (wrong cwd, missing binary, a runner bug) would otherwise read as
+    pass_rate 0.00 with no trace of why (tune turn 1, 2026-09-04)."""
+    log_dir = Path(log_dir)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    counter = {"n": 0}
+
+    def run(cmd: str, cwd: Path) -> tuple[int, str]:
+        counter["n"] += 1
+        r = subprocess.run(cmd, shell=True, cwd=cwd, capture_output=True, text=True, timeout=3600, env=scorer_env())
+        (log_dir / f"scorer-{counter['n']}.log").write_text(
+            f"$ {cmd}\n(cwd {cwd}, exit {r.returncode})\n--- stdout ---\n{r.stdout}\n--- stderr ---\n{r.stderr}\n")
+        return r.returncode, r.stdout
+
+    return run
+
+
+def scorer_env() -> dict[str, str]:
+    env = dict(os.environ)
+    if _CURRENT_HOP_DIR is not None:
+        env["HOP_DIR"] = str(_CURRENT_HOP_DIR)
+    return env
+
+
 def shell_runner(cmd: str, cwd: Path) -> tuple[int, str]:
-    r = subprocess.run(cmd, shell=True, cwd=cwd, capture_output=True, text=True, timeout=3600)
+    r = subprocess.run(cmd, shell=True, cwd=cwd, capture_output=True, text=True, timeout=3600, env=scorer_env())
     return r.returncode, r.stdout
 
 
@@ -120,6 +151,8 @@ def run_ladder(
 ) -> Verdict:
     doc, digest = load_hop(hop_path)
     hop_dir = hop_path.parent
+    global _CURRENT_HOP_DIR
+    _CURRENT_HOP_DIR = hop_dir
     evals = doc.get("evals") or []
     tuning = doc.get("tuning") or {}
     results: list[SuiteResult] = []
@@ -137,6 +170,17 @@ def run_ladder(
             results.append(res)
             continue
         cwd = hop_dir / str(suite.get("tasks", "."))
+        if not cwd.is_dir():
+            # A declared informational suite whose task directory does not exist yet (the frontier
+            # lane is declared so `tuning.frontierMetric` resolves, but not built) is skipped with its
+            # reason instead of crashing the ladder after the golden runs were paid for. A gating
+            # suite still runs, from the artifact directory (its scorer decides what is missing).
+            if not gates:
+                res.skipped = True
+                res.skip_reason = f"tasks dir missing: {cwd}"
+                results.append(res)
+                continue
+            cwd = hop_dir
         for _ in range(res.runs):
             rc, out = runner(str(suite["scorer"]), cwd)
             if rc == 0:

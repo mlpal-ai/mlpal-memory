@@ -1,7 +1,8 @@
 """FastAPI dependencies: auth identity + permission gates + service singletons.
 
-Auth uses the mlpal-auth SDK in production (JWT or mlpal_sk_ keys) and a dev/test fallback
-otherwise — the X-Test-* header scheme mirrors the platform's test harness. An
+Auth uses the mlpal-auth SDK in production (JWT or mlpal_sk_ keys), a static key file on a
+self-hosted instance (MLPAL_API_KEYS_FILE) and a dev/test fallback otherwise — the X-Test-*
+header scheme mirrors the platform's test harness. An
 ``X-Internal-Service-Key`` always grants machine-to-machine ingest.
 """
 
@@ -14,6 +15,7 @@ from fastapi import Depends, Header, HTTPException, Request
 from sqlalchemy import text as sa_text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..core.api_keys import get_api_key_file
 from ..core.config import get_settings
 from ..core.permissions import has_permission, team_ids_from_permissions
 from ..db import get_session
@@ -73,13 +75,19 @@ async def get_identity(
         return _identity(
             x_test_user_id or "dev-user", x_test_org_id or "dev-org", perms, x_test_api_key_id
         )
-    if not _HAS_MLPAL_AUTH:
+    if not s.api_keys_file and not _HAS_MLPAL_AUTH:
         raise HTTPException(status_code=503, detail="auth backend unavailable")
-    # 3) production: validate via mlpal-auth (JWT or mlpal_sk_ key, 60s SDK cache).
     # X-API-Key is the platform-UI convention for API keys; Bearer carries either.
     if not authorization and not x_api_key:
         raise HTTPException(status_code=401, detail="missing credentials")
     token = x_api_key or (authorization or "").removeprefix("Bearer ").strip()
+    # 3a) self-hosted: the operator's static key file pins every key to one tenant.
+    if s.api_keys_file:
+        key = get_api_key_file(s.api_keys_file).lookup(token)
+        if key is None:
+            raise HTTPException(status_code=401, detail="invalid credentials")
+        return _identity(key.user_id, key.org_id, list(key.permissions), key.key_id)
+    # 3b) platform: validate via mlpal-auth (JWT or mlpal_sk_ key, 60s SDK cache).
     try:
         from mlpal_auth import AuthClient  # type: ignore
 
@@ -161,6 +169,11 @@ def authorize_write_scope(identity: AuthIdentity, scope: str, scope_id: str | No
         return
     if scope == "user" and scope_id != identity.user_id:
         raise HTTPException(status_code=403, detail="cannot write another user's personal memory")
+    if scope == "team":
+        # memory v6 §5: a team's memory is written by its members (team:<id> grant), read by them
+        if scope_id in identity.team_ids:
+            return
+        raise HTTPException(status_code=403, detail="cannot write a team's memory without membership")
     if scope not in SELF_WRITABLE_SCOPES:
         raise HTTPException(
             status_code=403, detail=f"writing {scope} scope requires elevated authorization"

@@ -50,6 +50,8 @@ async def session():
 async def client():
     from mlpal_memory_graph.main import create_app
 
-    transport = ASGITransport(app=create_app())
+    app = create_app()
+    app.state.readiness = "ok"  # the test client runs no lifespan, so no warm-up marks the app ready
+    transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as c:
         yield c

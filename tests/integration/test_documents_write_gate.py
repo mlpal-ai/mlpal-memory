@@ -31,7 +31,7 @@ async def test_plain_writer_cannot_ingest_into_subject_scopes(client, scope, sco
         headers=_headers(),
     )
     assert r.status_code == 403
-    assert "elevated authorization" in r.json()["detail"]
+    assert ("elevated authorization" in r.json()["detail"]) or ("without membership" in r.json()["detail"])
 
 
 @pytest.mark.asyncio

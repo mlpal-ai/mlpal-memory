@@ -1,12 +1,22 @@
 # syntax=docker/dockerfile:1
 
 # Build stage
-FROM python:3.12-slim as builder
+# The memory explorer UI is built here so `docker compose up --build` needs no Node on the host.
+FROM node:22-alpine AS ui
+WORKDIR /ui
+COPY ui-app/package.json ui-app/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY ui-app/ ./
+RUN npm run build
+
+FROM python:3.12-slim AS builder
 
 WORKDIR /app
 
 # Install uv
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
+# A slow registry must not fail the build (uv's default is 30 s per download).
+ENV UV_HTTP_TIMEOUT=180
 
 # Copy project files (no uv.lock committed; editable install resolves from pyproject)
 COPY pyproject.toml README.md ./
@@ -18,7 +28,7 @@ COPY pyproject.toml README.md ./
 RUN uv pip install --system --no-cache -e ".[mcp,pg,local-embeddings]"
 
 # Runtime stage
-FROM python:3.12-slim as runtime
+FROM python:3.12-slim AS runtime
 
 WORKDIR /app
 
@@ -38,10 +48,8 @@ COPY --from=builder /usr/local/bin /usr/local/bin
 # Copy application code
 COPY src/ ./src/
 COPY alembic/ ./alembic/
-# Built Vite app (run `npm run build` in ui-app/ before docker build); legacy ui/
-# stays as main.py's fallback when dist is absent.
-COPY ui-app/dist/ ./ui-app/dist/
-COPY ui/ ./ui/
+# The Vite app from the ui stage.
+COPY --from=ui /ui/dist/ ./ui-app/dist/
 COPY alembic.ini .
 COPY pyproject.toml README.md ./
 

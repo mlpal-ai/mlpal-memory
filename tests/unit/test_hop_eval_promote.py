@@ -26,6 +26,8 @@ HOP = {
 def _write(tmp_path: Path, doc=HOP) -> Path:
     p = tmp_path / "hop.yaml"
     p.write_text(yaml.safe_dump(doc))
+    for e in doc.get("evals") or []:          # a declared suite has a task directory, as in a real artifact
+        (tmp_path / str(e.get("tasks", "."))).mkdir(parents=True, exist_ok=True)
     return p
 
 
@@ -78,7 +80,7 @@ def test_unversioned_artifact_refused(tmp_path):
     p.write_text(yaml.safe_dump({"name": "x", "evals": []}))
     try:
         run_ladder(p, runner=_runner({}))
-        assert False, "should refuse"
+        raise AssertionError("should refuse")
     except ValueError as e:
         assert "mlpal/hop-v1" in str(e)
 

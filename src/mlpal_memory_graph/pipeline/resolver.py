@@ -11,7 +11,10 @@ from ..core.scope import ScopeRef
 from .extractor import EntitySpec
 
 AUTHORITATIVE: frozenset[str] = frozenset(
-    {"Org", "Team", "User", "Agent", "MCPServer", "Tool", "Skill", "Chat", "Artifact"}
+    {"Org", "Team", "User", "Agent", "MCPServer", "Tool", "Skill", "Chat", "Artifact",
+     # keyed values (hop-v1.1 §9.3): the key IS the identity; two dates of one topic embed
+     # near-identically and must never merge
+     "Metric", "MetricValue"}
 )
 
 

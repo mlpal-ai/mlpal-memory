@@ -1,0 +1,8 @@
+{
+ "write-time LLM": "the server's memory agent via its OpenAI provider \u2192 counting proxy \u2192 claude-haiku-4-5-20251001 through the MLPal gateway (metered)",
+ "embedder": "text-embedding-3-small via SUPERMEMORY_EMBEDDING_API_KEY (OpenAI key, direct; not metered)",
+ "store": "supermemory lite encrypted local storage (pglite) under results/.system-supermemory-data",
+ "item": "memory sentence (kind=memory) or matching chunk (kind=chunk) from hybrid search; session id from the metadata we attach",
+ "ingest unit": "one add per session with document_date = session date; ingest waits for the server's async processing to finish",
+ "search": "search_mode=hybrid, limit=k, threshold=0, rerank off (default)"
+}

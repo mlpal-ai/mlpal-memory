@@ -36,6 +36,26 @@ def _episode_scope(episode) -> ScopeRef:
     return ScopeRef(scope, episode.scope_id or episode.org_id)
 
 
+
+def _parse_iso(value: str):
+    from datetime import UTC, datetime
+
+    dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
+
+
+def _anchor_text(ent) -> str:
+    """Readable form of a keyed anchor for embedding: 'infra/state/cost-daily/2026-09-15' ->
+    'cost daily 2026-09-15 (infra state)'. Path words alone embed as noise."""
+    topic = str(ent.props.get("topic") or ent.name)
+    key = str(ent.props.get("claim_key") or "")
+    parts = [seg for seg in topic.split("/") if seg]
+    generic = [seg for seg in parts if seg in {"infra", "state", "pref", "person", "watch"}]
+    subject = [seg.replace("-", " ").replace("_", " ") for seg in parts if seg not in generic]
+    text = " ".join(subject + [key]).strip()
+    return f"{text} ({' '.join(generic)})" if generic else text
+
+
 class Updater:
     @staticmethod
     async def _known_state_subjects(session, tenant_id: str) -> list[str]:
@@ -65,9 +85,14 @@ class Updater:
         self.direct = DirectMemory()
         # the cost-tiered 'full' path: LLM extraction (content episodes) + contradiction judge
         # (non-functional edges). Off unless MLPAL_EXTRACTOR=llm; tests pass llm_enabled=True.
-        self.llm_enabled = get_settings().extractor == "llm" if llm_enabled is None else llm_enabled
+        mode = get_settings().extractor
+        self.extractor_mode = mode
+        self.llm_enabled = mode in ("llm", "facts", "topics") if llm_enabled is None else llm_enabled
         self.llm_extractor = get_llm_extractor() if self.llm_enabled else None
-        self.judge = get_judge() if self.llm_enabled else None
+        # the contradiction judge belongs to the typed-ontology path; the facts path (memory v8 C3)
+        # accumulates dated statements, the topics path (memory v9 C4) folds keyed state — both
+        # leave supersession to keyed values
+        self.judge = get_judge() if (self.llm_enabled and mode not in ("facts", "topics")) else None
 
     async def process_episode(self, session, episode) -> dict:
         tier = extraction_tier(episode.action_type, bool(episode.content))
@@ -102,6 +127,10 @@ class Updater:
         # DIRECT tier: when the episode carries content, store it verbatim as retrievable
         # chunks (post-scrub) — the citeable ground truth the derived facts are inferred from.
         direct_doc = 0
+        import time as _time
+
+        timings: dict[str, int] = {}
+        _t = _time.monotonic()
         if episode.content:
             doc = await self.direct.add_document(
                 session,
@@ -116,13 +145,34 @@ class Updater:
                 valid_at=episode.occurred_at,  # bitemporal: content's event time
             )
             direct_doc = 1 if doc is not None else 0
+            timings.update(getattr(self.direct, "last_ingest_timings", {}) or {})
+        timings["direct_ms"] = int((_time.monotonic() - _t) * 1000)
+        _t = _time.monotonic()
 
         # DERIVED tier: rule extraction always runs (the cheap, deterministic backbone). For the
         # 'full' tier, the LLM extractor mines the (already-redacted) content and merges in — both
         # produce the same (entities, edges, invalidations) shape. The read path stays LLM-free.
         extraction = extract(episode)
-        if self.llm_enabled and tier == "llm" and episode.content:
-            llm_ex = await self.llm_extractor.extract(episode, reference_time=episode.occurred_at)
+        # hop-v1.1 §9.3: a claim is already structured; it maps straight onto keyed values / facts and
+        # the free-text passes below must not mine its value text for spurious metrics
+        from .claims import CLAIM_ACTION, extract_claim
+
+        is_claim = episode.action_type == CLAIM_ACTION
+        if is_claim:
+            c = extract_claim(episode)
+            extraction.entities.extend(c.entities)
+            extraction.edges.extend(c.edges)
+        if self.llm_enabled and tier == "llm" and episode.content and not is_claim:
+            if self.extractor_mode == "topics":
+                # memory v9 C4: the topic extractor folds onto the user's current topic states
+                from .topic_state import load_topic_states
+
+                user = str((episode.actor or {}).get("user_id") or "unknown")
+                current = await load_topic_states(session, tenant_id=tenant_id, user=user)
+                llm_ex = await self.llm_extractor.extract(episode, reference_time=episode.occurred_at,
+                                                          known_topics=[label for label, _ in current.values()], current_states=current)
+            else:
+                llm_ex = await self.llm_extractor.extract(episode, reference_time=episode.occurred_at)
             extraction.entities.extend(llm_ex.entities)
             extraction.edges.extend(llm_ex.edges)
             extraction.invalidations.extend(llm_ex.invalidations)
@@ -137,7 +187,9 @@ class Updater:
             llm_extract_value_specs,
         )
 
-        if _gs().value_extractor == "llm":
+        if is_claim:
+            v_entities, v_edges = [], []
+        elif _gs().value_extractor == "llm":
             v_entities, v_edges = await llm_extract_value_specs(episode.content)
             # lifecycle state flips (x11): same watched-fact machinery, LLM tier only.
             # Existing anchors are passed in so subject naming stays sticky across
@@ -184,6 +236,12 @@ class Updater:
             obj.derived_from = refs
             if obj.workspace is None:  # first-learned facet, like source provenance
                 obj.workspace = episode.workspace
+            if hasattr(obj, "observed_count"):
+                # memory v7 WP3 survival: when this memory was last observed in the world. Kept in
+                # props because updated_at moves whenever trust or endorsement is rewritten.
+                props = dict(obj.props or {})
+                props["last_observed_at"] = episode.occurred_at.isoformat()
+                obj.props = props
             if newly_created:
                 if is_working:
                     obj.status = "working"
@@ -202,10 +260,32 @@ class Updater:
             embedding = None
             if ent.type == "Fact":
                 embedding = await self.embedder.embed_one(ent.name)
-            node = await self.resolver.resolve_entity(
-                session, tenant_id, scope, ent, embedding, source=episode.source
-            )
+            elif is_claim and ent.type == "Metric":
+                # the anchor is what a question lands on ("today's cost report" -> the
+                # cost-daily topic); its value node is reached by expansion, not by search
+                embedding = await self.embedder.embed_one(_anchor_text(ent))
+            node = None
+            aliases = list((ent.props or {}).get("aliases") or [])
+            if aliases:
+                # memory v7 WP7 identity resolution: the same thing under another name in another
+                # system (the payments service in Slack, the repo, the cluster) is one node
+                for alias in [ent.key, *aliases]:
+                    node = await self.driver.find_node(session, tenant_id, scope, ent.type, alias)
+                    if node is not None:
+                        break
+                if node is not None:
+                    known = set((node.props or {}).get("also_known_as") or [])
+                    known |= {a for a in [ent.key, *aliases] if a != node.key}
+                    props = dict(node.props or {}); props["also_known_as"] = sorted(known); node.props = props
+            if node is None:
+                node = await self.resolver.resolve_entity(
+                    session, tenant_id, scope, ent, embedding, source=episode.source
+                )
             _stamp(node)
+            if is_claim and ent.type in ("MetricValue", "Fact") and (ent.props or {}).get("valid_until"):
+                # memory v7 WP3: the writer said when this stops being true; reads hide it after
+                # that instant and the sweep closes it bitemporally (never deletes it)
+                node.expires_at = _parse_iso((ent.props or {})["valid_until"])
             node_map[(ent.type, ent.key)] = node
 
         edge_count = 0
@@ -234,6 +314,8 @@ class Updater:
                 embedding_dim=self.embedder.dim,
             )
             _stamp(edge)
+            if is_claim and (e.props or {}).get("valid_until"):
+                edge.expires_at = _parse_iso(e.props["valid_until"])
             if e.functional:
                 # functional + diff-dst + overlap → deterministic auto-invalidate (D1, no LLM)
                 await self.driver.invalidate_superseded(
@@ -291,6 +373,22 @@ class Updater:
         # explicit ends: a stative relation that was terminated (e.g. a member removed) — close
         # the matching open edge at the episode time. Invalidate-not-delete; history is preserved.
         ended = 0
+        # memory v6 WP15: observation of absence. A state claim whose value says the target is gone
+        # ("absent since <date>", "ended", "deleted") ends the entity that carries that key: its
+        # live edges close at the claim's valid time, so the current view no longer reaches it and
+        # an as-of read before that instant still does. The watch anchor's own value edge stays.
+        if is_claim:
+            from .claims import absence_target
+
+            target = absence_target(episode)
+            if target:
+                ended += await self.driver.end_entity(session, tenant_id=tenant_id, key=target, at=episode.occurred_at)
+            else:
+                from .claims import presence_target
+
+                back = presence_target(episode)
+                if back:
+                    await self.driver.reopen_entity(session, tenant_id=tenant_id, key=back)
         for inv in extraction.invalidations:
             src = node_map.get((inv.src_type, inv.src_key))
             dst = node_map.get((inv.dst_type, inv.dst_key))
@@ -321,6 +419,7 @@ class Updater:
             contradictions=judged,
             direct_docs=direct_doc,
         )
+        timings["derived_ms"] = int((_time.monotonic() - _t) * 1000)
         return {
             "tier": tier,
             "nodes": len(node_map),
@@ -328,4 +427,5 @@ class Updater:
             "ended": ended + judged,
             "contradictions": judged,
             "direct_docs": direct_doc,
+            "timings_ms": timings,
         }

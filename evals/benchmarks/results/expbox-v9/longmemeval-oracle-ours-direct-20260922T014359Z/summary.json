@@ -1,0 +1,127 @@
+{
+ "bench": "longmemeval",
+ "split": "oracle",
+ "arm": "direct",
+ "reader": "claude-sonnet-5",
+ "judge": "claude-sonnet-5",
+ "topk": 12,
+ "per_document": 8,
+ "context_token_budget": 6000,
+ "context_source": "passages",
+ "reader_prompt_version": "v2-dated-preferences",
+ "org_tag": null,
+ "judge_note": "official LongMemEval judge is gpt-4o-2024-08-06; this run used the gateway model named in `judge`",
+ "n": 96,
+ "scored": 96,
+ "errors": 0,
+ "accuracy": 0.865,
+ "recall@5": 0.992,
+ "recall@15": 0.992,
+ "context_tokens": {
+  "mean": 1892.604,
+  "p95": 2539
+ },
+ "search_ms": {
+  "p50": 74,
+  "p95": 90
+ },
+ "answer_ms": {
+  "p50": 3066,
+  "p95": 10974
+ },
+ "search_stage_ms_mean": {
+  "derived_ms": null,
+  "direct_ms": null,
+  "direct_embed_ms": null,
+  "direct_vector_ms": null,
+  "direct_idf_ms": null,
+  "direct_lexical_ms": null,
+  "direct_title_ms": null
+ },
+ "ingest_stage_ms": {
+  "chunks": 0,
+  "chunk_ms": 0,
+  "embed_ms": 0,
+  "insert_ms": 0,
+  "direct_ms": 0,
+  "derived_ms": 0
+ },
+ "ingest": {
+  "docs": 171,
+  "chars": 2425274,
+  "ms": 109768,
+  "chars_per_s": 22095
+ },
+ "by_type": {
+  "knowledge-update": {
+   "n": 16,
+   "accuracy": 1.0,
+   "recall@5": 1.0,
+   "recall@15": 1.0
+  },
+  "multi-session": {
+   "n": 16,
+   "accuracy": 0.625,
+   "recall@5": 0.984,
+   "recall@15": 0.984
+  },
+  "single-session-assistant": {
+   "n": 16,
+   "accuracy": 1.0,
+   "recall@5": 1.0,
+   "recall@15": 1.0
+  },
+  "single-session-preference": {
+   "n": 16,
+   "accuracy": 0.938,
+   "recall@5": 1.0,
+   "recall@15": 1.0
+  },
+  "single-session-user": {
+   "n": 16,
+   "accuracy": 1.0,
+   "recall@5": 1.0,
+   "recall@15": 1.0
+  },
+  "temporal-reasoning": {
+   "n": 16,
+   "accuracy": 0.625,
+   "recall@5": 0.969,
+   "recall@15": 0.969
+  }
+ },
+ "model_usage": {
+  "claude-sonnet-5": {
+   "input": 341982,
+   "output": 20272,
+   "calls": 199,
+   "compute_units": 0.08866840000000001,
+   "latency_ms": 553045
+  }
+ },
+ "cost_usd_estimate": 1.33,
+ "system": "ours",
+ "system_usage": {
+  "ingest": {
+   "llm_calls": 0,
+   "llm_input_tokens": 0,
+   "llm_output_tokens": 0,
+   "embed_calls": 0,
+   "embed_tokens": 0
+  },
+  "search": {
+   "llm_calls": 0,
+   "llm_input_tokens": 0,
+   "llm_output_tokens": 0,
+   "embed_calls": 0,
+   "embed_tokens": 0
+  },
+  "items_created": 171,
+  "ingest_errors": 0,
+  "ingest_usd_estimate": 0.0,
+  "search_usd_estimate": 0.0
+ },
+ "wall_s": 565.8,
+ "service": "http://localhost:8000",
+ "at": "2026-09-22T01:53:24.914296+00:00"
+}

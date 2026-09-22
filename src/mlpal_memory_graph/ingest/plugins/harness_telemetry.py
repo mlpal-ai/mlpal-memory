@@ -18,6 +18,12 @@ Contracts (version-discriminated by the event's ``contract`` field):
   agent verdict lives at ``checks.agent.verdict``; the legacy ``verifier{}``
   block remains optional for emitters that persist findings to memory://.
 
+- D11.3 (landed 2026-09-04, hop-v1.1 §10.1): D11.2 plus the PARKED outcome — ``run_result``
+  gains ``needs_approval`` (failure_class MUST be ``approval_pending``) and the vocab becomes
+  failure_class_vocab@v2 (+ policy_denied, approval_declined, preflight_failed). D11.2 stays
+  frozen: a parked run under D11.2 is emitted as ``cancelled`` and the run-dir artifact
+  (hop-run-result-v1) is the source of truth; the distiller never reads that as a park.
+
 D11.1 rows lack the new fields; the distiller reads them as ABSENT, never zero.
 """
 
@@ -31,6 +37,10 @@ from ..envelope import Actor, EpisodeEnvelope
 log = get_logger(__name__)
 
 RUN_RESULTS = frozenset({"success", "error", "max_turns", "cancelled"})
+# D11.3 adds the PARKED terminal outcome: the run stopped at the safety envelope edge
+# (hop-v1.1 §10.1 hop-run-result-v1 status needs_approval). Under D11.2 a parked run is
+# emitted as `cancelled` (least-wrong, agreed 2026-09-03) and the run-dir artifact is truth.
+RUN_RESULTS_D113 = RUN_RESULTS | {"needs_approval"}
 FEEDBACK_OUTCOMES = frozenset({"accepted", "retried", "escalated", "failed"})
 VERIFIER_VERDICTS = frozenset({"PASS", "FAIL", "PARTIAL"})
 ACTION_TYPES = frozenset({"run.completed", "verifier.failed", "eval.scored"})
@@ -42,6 +52,27 @@ FAILURE_CLASSES = frozenset({
     "empty_patch", "step_budget_stall", "test_timeout", "tool_error",
     "gateway_error", "verifier_reject", "user_cancelled", "other",
 })
+# failure_class_vocab@v2 (D11.3): the safety-envelope classes. approval_pending is the ONLY
+# class allowed with run_result == needs_approval (and required by it); the other three are
+# real failures at the gate. v1 stays frozen: a d11.2 event carrying a v2 class is rejected.
+FAILURE_CLASSES_V2 = FAILURE_CLASSES | {
+    "approval_pending", "policy_denied", "approval_declined", "preflight_failed",
+}
+CONTRACTS_WITH_CHECKS = frozenset({"d11.2", "d11.3", "d11.4", "d11.5", "d11.6", "d11.7"})
+# d11.6 (2026-09-15) = d11.5 + memory_projection {fact_count, estimated_tokens, truncated};
+# d11.7 (2026-09-17) = d11.6 + tool_calls {tool name: count} — content-free, so "answered without a
+# live read" can be computed (memory v7 WP1). Tool names are low-cardinality identifiers.
+CONTRACTS_D115_PLUS = frozenset({"d11.5", "d11.6", "d11.7"})
+CONTRACTS_D116_PLUS = frozenset({"d11.6", "d11.7"})
+TOOL_CALLS_MAX_TOOLS = 64
+LABELS_MAX = 16  # d11.8 provider labels
+# D11.4 (harness, 2026-09-04): role main|subagent + run_id required, parent_run_id on sub-agent
+# runs, task_type from YODEX_HOP_TELEMETRY_TASK. A D11.3 event may be either role, so role is
+# NEVER defaulted for d11.3: absent means unknown (the shipper may derive it from the run file
+# and say so with role_source). D11.2 is treated the same: the sink has lived inside buildSession
+# since 2026-09-01, so a d11.2 child session WOULD have emitted; the x12 rows are main only by
+# inspection (64 files, one event each) and are stamped role_source "verified-single-event-per-run".
+ROLES = frozenset({"main", "subagent"})
 
 
 class TelemetryContractError(ValueError):
@@ -95,11 +126,20 @@ def normalize_run_outcome(event: dict, *, user_id: str) -> EpisodeEnvelope:
     """RunOutcomeEvent → episode envelope. Allowlist projection; content-free."""
     action = event.get("action_type")
     _require(action in ACTION_TYPES, f"unknown action_type {action!r}")
-    is_d112 = event.get("contract") == "d11.2"
+    contract = event.get("contract")
+    # memory v10: the gates are "at least this version" — the contracts only add fields, and a
+    # literal tuple stopping at d11.5 silently excluded every d11.6/d11.7 run from the tuning loop
+    from ...pipeline.hop_names import contract_at_least
+
+    is_d112 = contract_at_least(contract, "d11.2")  # d11.2 shape; d11.3 = d11.2 + parked outcome
+    is_d113 = contract_at_least(contract, "d11.3")  # parked outcome + vocab@v2
+    is_d114 = contract_at_least(contract, "d11.4")  # d11.5 (2026-09-15) = d11.4 + memories_injected
+    run_results = RUN_RESULTS_D113 if is_d113 else RUN_RESULTS
+    failure_classes = FAILURE_CLASSES_V2 if is_d113 else FAILURE_CLASSES
     p = event.get("payload") or {}
     hop = p.get("hop") or {}
     _require(bool(hop.get("name")) and bool(hop.get("version")), "hop {name, version} required")
-    _require(p.get("run_result") in RUN_RESULTS, f"run_result must be one of {sorted(RUN_RESULTS)}")
+    _require(p.get("run_result") in run_results, f"run_result must be one of {sorted(run_results)}")
     fo = p.get("feedback_outcome")
     _require(fo is None or fo in FEEDBACK_OUTCOMES, f"bad feedback_outcome {fo!r}")
     verifier = p.get("verifier") or {}
@@ -140,22 +180,65 @@ def normalize_run_outcome(event: dict, *, user_id: str) -> EpisodeEnvelope:
         },
         "turns": int(p.get("turns", 0)),
     }
+    # role: main loop vs sub-agent run (verifier, delegated reads). Sub-agents emit their own
+    # run.completed under the same hop; without this the distiller counts each HOP run 4×.
+    role = p.get("role")
+    if is_d114:
+        _require(role in ROLES, "d11.4 requires role main|subagent")
+        _require(bool(p.get("run_id")), "d11.4 requires run_id")
+        payload["run_id"] = str(p["run_id"])
+    elif role is not None:
+        _require(role in ROLES, "role must be main or subagent")
+    if role is not None:
+        payload["role"] = role
+        if p.get("role_source"):
+            payload["role_source"] = str(p["role_source"])
+    if p.get("parent_run_id"):
+        payload["parent_run_id"] = str(p["parent_run_id"])
+    if contract_at_least(contract, "d11.5") and "memories_injected" in p:
+        mi = p["memories_injected"]
+        _require(isinstance(mi, list) and all(isinstance(x, str) for x in mi), "d11.5 memories_injected must be a list of ids")
+        payload["memories_injected"] = list(mi)   # the local topics rendered into the prompt (event ids)
+    if contract_at_least(contract, "d11.6") and "memory_projection" in p:
+        mp = p["memory_projection"]
+        _require(isinstance(mp, dict) and isinstance(mp.get("fact_count"), int) and isinstance(mp.get("estimated_tokens"), int)
+                 and isinstance(mp.get("truncated"), bool), "d11.6 memory_projection must be {fact_count int, estimated_tokens int, truncated bool}")
+        payload["memory_projection"] = {"fact_count": mp["fact_count"], "estimated_tokens": mp["estimated_tokens"], "truncated": mp["truncated"]}
+    if contract_at_least(contract, "d11.7") and "tool_calls" in p:
+        tc = p["tool_calls"]
+        _require(isinstance(tc, dict) and len(tc) <= TOOL_CALLS_MAX_TOOLS
+                 and all(isinstance(k, str) and k and isinstance(v, int) and v >= 0 for k, v in tc.items()),
+                 f"d11.7 tool_calls must map ≤{TOOL_CALLS_MAX_TOOLS} tool names to non-negative int counts")
+        payload["tool_calls"] = {str(k)[:120]: int(v) for k, v in tc.items()}
+    if contract_at_least(contract, "d11.8") and "labels" in p:
+        # d11.8 (memory v10): provider CLI → count of Bash calls that started with it; a label, never a command
+        lb = p["labels"]
+        _require(isinstance(lb, dict) and len(lb) <= LABELS_MAX
+                 and all(isinstance(k, str) and k and isinstance(v, int) and v >= 0 for k, v in lb.items()),
+                 f"d11.8 labels must map ≤{LABELS_MAX} provider names to non-negative int counts")
+        payload["labels"] = {str(k)[:40]: int(v) for k, v in lb.items()}
 
     if is_d112:
-        payload["contract"] = "d11.2"
+        payload["contract"] = contract
         # wall_ms replaces wall_s; a d11.2 event carrying wall_s is REJECTED —
         # accepting both units under one version is silent drift.
-        _require("wall_s" not in p, "d11.2 uses wall_ms; wall_s present")
-        _require(isinstance(p.get("wall_ms"), int), "d11.2 requires int wall_ms")
+        _require("wall_s" not in p, f"{contract} uses wall_ms; wall_s present")
+        _require(isinstance(p.get("wall_ms"), int), f"{contract} requires int wall_ms")
         payload["wall_ms"] = p["wall_ms"]
         # failure_class: PRESENT always; null IFF success (frozen invariant).
-        _require("failure_class" in p, "d11.2 requires failure_class (null on success)")
+        _require("failure_class" in p, f"{contract} requires failure_class (null on success)")
         fc = p["failure_class"]
+        vocab = "v2" if is_d113 else "v1"
         if p["run_result"] == "success":
             _require(fc is None, "failure_class must be null on success")
+        elif p["run_result"] == "needs_approval":
+            _require(fc == "approval_pending",
+                     "run_result needs_approval requires failure_class approval_pending")
         else:
-            _require(fc in FAILURE_CLASSES,
-                     f"failure_class must be from failure_class_vocab@v1, got {fc!r}")
+            _require(fc in failure_classes,
+                     f"failure_class must be from failure_class_vocab@{vocab}, got {fc!r}")
+            _require(fc != "approval_pending",
+                     "approval_pending is only valid with run_result needs_approval")
         payload["failure_class"] = fc
         payload["checks"] = _validate_d112_checks(p.get("checks") or {})
         tier = p.get("tier")

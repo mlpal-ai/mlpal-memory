@@ -1,0 +1,8 @@
+{
+ "write-time LLM": "anthropic/claude-haiku-4-5-20251001 via litellm (cognify: extraction, summaries); several calls per chunk",
+ "embedder": "text-embedding-3-small via the OpenAI key",
+ "store": "cognee defaults under the run dir (sqlite, LanceDB, embedded graph store)",
+ "item": "chunk (kind=chunk, session found by text match) and the GRAPH_COMPLETION context text (kind=graph_context, only_context=True)",
+ "ingest unit": "one add per session (session-date line prefixed), one cognify per haystack (dataset); chunk_size=256",
+ "search": "CHUNKS top_k=k (chunk items first), then the GRAPH_COMPLETION only_context text split into node/edge items; session memory (CACHING) off"
+}

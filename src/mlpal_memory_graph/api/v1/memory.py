@@ -11,7 +11,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -26,7 +26,7 @@ async def _value_since_map(session, resolution, ctx=None, query: str | None = No
     status = live" existed and answered the question but never survived the top-5
     node cutoff against name-frequent mlpal-* nodes. Watched questions deserve a
     keyed read, not ranking roulette. Caller-visible scopes only."""
-    from sqlalchemy import select, tuple_
+    from sqlalchemy import func, or_, select, tuple_
 
     from ...db.models import Edge, Node
     from ...services.packets import _tokens
@@ -64,6 +64,7 @@ async def _value_since_map(session, resolution, ctx=None, query: str | None = No
                         .where(
                             Edge.type == "HAS_VALUE",
                             Edge.invalid_at.is_(None),
+                            or_(Edge.expires_at.is_(None), Edge.expires_at > func.now()),
                             Edge.src_id.in_([a.id for a in hits]),
                         )
                     )
@@ -85,6 +86,7 @@ async def _value_since_map(session, resolution, ctx=None, query: str | None = No
     ).all()
     return dict(rows)
 
+from ...core.topics import grant_from_headers
 from ...core.scope import Scope, ScopeRef
 from ...db import get_session
 from ...graph import get_driver
@@ -99,6 +101,12 @@ from ...schemas.memory import (
     NodeOut,
     PassageOut,
     ProjectionResponse,
+    EndorseRequest,
+    EndorseResponse,
+    FusedHit,
+    ProfileResponse,
+    RetractRequest,
+    RetractResponse,
     PublishRequest,
     PublishResponse,
     SearchResponse,
@@ -211,6 +219,7 @@ def _context(
     agent: str | None = None,
     use_case: str | None = None,
     workspace: str | None = None,
+    topic_grant=None,
 ) -> RetrievalContext:
     """Build the retrieval context, activating any subject scopes named in the request.
 
@@ -229,6 +238,7 @@ def _context(
     if workspace and not repo:
         subjects.append(ScopeRef(Scope.REPO, workspace))
     return RetrievalContext(
+        topic_grant=topic_grant,
         tenant_id=identity.org_id,
         user_id=identity.user_id,
         team_ids=tuple(identity.team_ids),
@@ -238,12 +248,44 @@ def _context(
     )
 
 
+
+# The `type` filter names an ontology node type (Metric, Fact, Agent, ...). A HOP thinks in memory
+# kinds (memory v6 §2), and a model asked to "read the state key" naturally passes `type=state`,
+# which matched no node and hid the very anchor it wanted (flip to 0.3.0, 2026-09-17). Kind names
+# map onto the graph: state / preference are Metric anchors by key prefix, learning is a Fact.
+_KIND_FILTERS: dict[str, tuple[str, str | None]] = {
+    "state": ("Metric", "state:"),
+    "preference": ("Metric", "pref:"),
+    "pref": ("Metric", "pref:"),
+    "learning": ("Fact", None),
+}
+
+
+def _type_filter(type_: str | None) -> tuple[str | None, str | None]:
+    """(node type to retrieve, anchor key prefix to keep) for a `type` query value."""
+    if type_ and type_.lower() in _KIND_FILTERS:
+        return _KIND_FILTERS[type_.lower()]
+    return type_, None
+
+
+def _keep_kind(res, key_prefix: str | None) -> None:
+    """Drop anchors outside the kind's key prefix and the values that hang off them."""
+    if not key_prefix:
+        return
+    dropped = {m.node.id for m in res.nodes if m.node.type == "Metric" and not (m.node.key or "").startswith(key_prefix)}
+    if not dropped:
+        return
+    dropped |= {e.dst_id for e in res.edges if e.type == "HAS_VALUE" and e.src_id in dropped}
+    res.nodes[:] = [m for m in res.nodes if m.node.id not in dropped]
+    res.edges[:] = [e for e in res.edges if e.src_id not in dropped and e.dst_id not in dropped]
+
 @router.get("/search", response_model=SearchResponse)
 async def search_memory(
+    request: Request,
     session: Annotated[AsyncSession, Depends(get_session)],
     identity: Annotated[AuthIdentity, Depends(require_permission("memory.read"))],
     q: str | None = Query(None, description="natural-language query"),
-    type: str | None = Query(None, description="filter by ontology node type"),
+    type: str | None = Query(None, description="filter by ontology node type (Metric, Fact, ...) or memory kind (state, preference, learning)"),
     scope: Scope | None = Query(None, description="narrow to a single scope kind"),
     repo: str | None = Query(None, description="activate a repo subject scope"),
     service: str | None = Query(None, description="activate a service subject scope"),
@@ -268,7 +310,12 @@ async def search_memory(
         "appear) | filter (hard-bound results to the workspace — the Graph's focus "
         "semantics; may return fewer than limit)",
     ),
+    fusion: str | None = Query(None, pattern="^(rrf)$", description="rrf: also return one ranked list across facts and passages"),
+    per_document: int = Query(1, ge=1, le=10, description="passages per document in the page (1 = one best chunk per document)"),
 ) -> SearchResponse:
+    import time as _time
+
+    t0 = _time.monotonic()
     ctx = _context(
         identity,
         repo=repo,
@@ -276,12 +323,14 @@ async def search_memory(
         agent=agent,
         use_case=use_case,
         workspace=workspace,
+        topic_grant=grant_from_headers(request.headers, identity.user_id),
     )
+    node_type, key_prefix = _type_filter(type)
     res = await get_retrieval().resolve(
         session,
         ctx,
         query=q,
-        type_=type,
+        type_=node_type,
         scope=scope,
         origin=origin,
         as_of=as_of,
@@ -289,7 +338,9 @@ async def search_memory(
         limit=limit,
         depth=depth,
         legs={legs} if legs else None,
+        per_document=per_document,
     )
+    _keep_kind(res, key_prefix)
     if workspace and workspace_mode == "filter":
         # hard focus (UI QA: a soft boost let 19 foreign-workspace facts outrank
         # the focused workspace's 1 — truthful focus chips need a real bound)
@@ -298,38 +349,97 @@ async def search_memory(
         kept = {m.node.id for m in res.nodes}
         res.edges[:] = [e for e in res.edges if e.src_id in kept or e.dst_id in kept]
     doc_meta = await _doc_meta_for(session, res.passages)
-    from ...services.usage import mark_served
+    from ...services.usage import mark_served, record_served, run_context
 
     await mark_served(
         session,
         chunk_ids=[p.chunk.id for p in res.passages],
         node_ids=[m.node.id for m in res.nodes],
     )
+    await record_served(session, tenant_id=identity.org_id, run=run_context(request.headers), tool="search",
+                        node_ids=[m.node.id for m in res.nodes], chunk_ids=[p.chunk.id for p in res.passages])
+    await session.commit()
+    fused = None
+    if fusion == "rrf":
+        # memory v7 WP11: the two tiers were ranked independently and concatenated; here they share
+        # one RRF list so a caller (or the packet) can take the top-k across facts and passages
+        from ...services.hybrid import rrf_fuse
+
+        scores = rrf_fuse([[f"node:{m.node.id}" for m in res.nodes], [f"passage:{p.chunk.id}" for p in res.passages]])
+        fused = [FusedHit(kind=k.split(":", 1)[0], id=k.split(":", 1)[1], score=round(v, 6))
+                 for k, v in sorted(scores.items(), key=lambda kv: -kv[1])][:limit]
     return SearchResponse(
         nodes=[_node_out(m) for m in res.nodes],
         edges=[_edge_out(e) for e in res.edges],
         passages=[_passage_out(p, doc_meta) for p in res.passages],
+        fused=fused,
+        took_ms=int((_time.monotonic() - t0) * 1000),
+        timings_ms=res.timings_ms or None,
+        degraded=getattr(res, "degraded", None) or None,
     )
 
 
 @router.get("/projection", response_model=ProjectionResponse)
 async def memory_projection(
+    request: Request,
     session: Annotated[AsyncSession, Depends(get_session)],
     identity: Annotated[AuthIdentity, Depends(require_permission("memory.read"))],
     repo: str | None = Query(None, description="activate a repo subject scope"),
     service: str | None = Query(None, description="activate a service subject scope"),
     agent: str | None = Query(None, description="activate an agent subject scope"),
     token_budget: int = Query(5000, ge=200, le=50000, description="max tokens to render"),
+    workspace: str | None = Query(None, description="the session's workspace facet"),
+    hop: str | None = Query(None, description="the HOP name: selects the caller's per-HOP preferences"),
+    inject: str | None = Query(None, description="comma-separated state topic ids to render first (the HOP's inject: true topics)"),
 ) -> ProjectionResponse:
-    """The always-on Markdown memory tier — current facts across scopes, budget-capped."""
-    ctx = _context(identity, repo=repo, service=service, agent=agent)
-    p = await render_projection(session, ctx, token_budget=token_budget)
+    """The always-on Markdown memory tier: the caller's preferences and the HOP's injected state
+    first, then current learnings ordered by trust tier and recency, budget-capped (memory v6 §8)."""
+    import time as _time
+
+    t0 = _time.monotonic()
+    ctx = _context(identity, repo=repo, service=service, agent=agent, workspace=workspace,
+                   topic_grant=grant_from_headers(request.headers, identity.user_id))
+    topics = [t.strip() for t in (inject or "").split(",") if t.strip()] or None
+    p = await render_projection(session, ctx, token_budget=token_budget, hop=hop, inject_topics=topics)
+    # what a run saw at session start counts as served: trust by consequence joins it with the verdict
+    from ...services.usage import record_served, run_context
+
+    await record_served(session, tenant_id=identity.org_id, run=run_context(request.headers), tool="projection",
+                        node_ids=p.node_ids)
+    await session.commit()
     return ProjectionResponse(
         markdown=p.markdown,
         estimated_tokens=p.estimated_tokens,
         fact_count=p.fact_count,
         truncated=p.truncated,
+        took_ms=int((_time.monotonic() - t0) * 1000),
     )
+
+
+@router.get("/profile", response_model=ProfileResponse)
+async def memory_profile(
+    request: Request,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    identity: Annotated[AuthIdentity, Depends(require_permission("memory.read"))],
+    hop: str | None = Query(None, description="the HOP name: selects the caller's per-HOP preferences"),
+    workspace: str | None = Query(None),
+    learnings: int = Query(10, ge=0, le=50),
+    recent: int = Query(10, ge=0, le=50),
+) -> ProfileResponse:
+    """memory v7 WP11: the person's profile in one call — stable facts and recent activity."""
+    import time as _time
+
+    from ...services.projection import render_profile
+    from ...services.usage import record_served, run_context
+
+    t0 = _time.monotonic()
+    ctx = _context(identity, workspace=workspace, topic_grant=grant_from_headers(request.headers, identity.user_id))
+    pr = await render_profile(session, ctx, hop=hop, learnings=learnings, recent=recent)
+    ids = [x["id"] for x in (*pr.preferences, *pr.state, *pr.learnings) if x.get("id")]
+    await record_served(session, tenant_id=identity.org_id, run=run_context(request.headers), tool="profile", node_ids=ids)
+    await session.commit()
+    return ProfileResponse(markdown=pr.markdown, preferences=pr.preferences, state=pr.state, learnings=pr.learnings,
+                           recent=pr.recent, estimated_tokens=pr.estimated_tokens, took_ms=int((_time.monotonic() - t0) * 1000))
 
 
 @router.get("/explain", response_model=ExplainResponse)
@@ -337,7 +447,7 @@ async def explain_memory(
     session: Annotated[AsyncSession, Depends(get_session)],
     identity: Annotated[AuthIdentity, Depends(require_permission("memory.read"))],
     q: str | None = Query(None, description="natural-language query"),
-    type: str | None = Query(None, description="filter by ontology node type"),
+    type: str | None = Query(None, description="filter by ontology node type (Metric, Fact, ...) or memory kind (state, preference, learning)"),
     scope: Scope | None = Query(None, description="narrow to a single scope kind"),
     repo: str | None = Query(None, description="activate a repo subject scope"),
     service: str | None = Query(None, description="activate a service subject scope"),
@@ -345,9 +455,11 @@ async def explain_memory(
     limit: int = Query(10, ge=1, le=100),
 ) -> ExplainResponse:
     ctx = _context(identity, repo=repo, service=service, agent=agent)
+    node_type, key_prefix = _type_filter(type)
     res = await get_retrieval().resolve(
-        session, ctx, query=q, type_=type, scope=scope, limit=limit, expand=False
+        session, ctx, query=q, type_=node_type, scope=scope, limit=limit, expand=False
     )
+    _keep_kind(res, key_prefix)
     t = res.trace
     return ExplainResponse(
         query=q,
@@ -520,6 +632,29 @@ async def answer_memory_stream(
                              headers={"Cache-Control": "no-cache"})
 
 
+@router.get("/report")
+async def memory_report(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    identity: Annotated[AuthIdentity, Depends(require_permission("memory.read"))],
+    window_days: int = Query(7, ge=1, le=90),
+    hop: str | None = Query(None, description="restrict runs to this HOP name"),
+    stale_after_days: float = Query(2.0, ge=0.1, le=365),
+    hop_alias: str | None = Query(None, description="variant=hop pairs, comma-separated (infra-ro=infra)"),
+    format: str = Query("json", description="json | markdown"),
+):
+    """The owner's memory report (memory v6 §10): runs, cost as tokens, memory contribution, quality,
+    freshness, trust, governance, storage. Counts over the tenant's ledgers; no model calls."""
+    from fastapi.responses import PlainTextResponse
+
+    from ...services.report import build_report, render_markdown
+
+    aliases = dict(a.split("=", 1) for a in hop_alias.split(",")) if hop_alias else None
+    r = await build_report(session, identity.org_id, window_days=window_days, hop=hop, stale_after_days=stale_after_days, hop_aliases=aliases)
+    if format == "markdown":
+        return PlainTextResponse(render_markdown(r), media_type="text/markdown")
+    return r
+
+
 @router.get("/metrics", response_model=MetricsResponse)
 async def metric_histories(
     session: Annotated[AsyncSession, Depends(get_session)],
@@ -576,6 +711,7 @@ async def metric_histories(
 
 @router.get("/answer", response_model=AnswerResponse)
 async def answer_memory(
+    request: Request,
     session: Annotated[AsyncSession, Depends(get_session)],
     identity: Annotated[AuthIdentity, Depends(require_permission("memory.read"))],
     q: str = Query(..., min_length=2, description="the question to answer from memory"),
@@ -602,6 +738,9 @@ async def answer_memory(
         None, description="model override for synthesis (x5 experiment arms)"
     ),
     max_hops: int = Query(3, ge=1, le=5, description="hop budget for mode=hop"),
+    per_document: int = Query(1, ge=1, le=10, description="passages per document in the page (conversation haystacks want several)"),
+    max_passages: int = Query(5, ge=1, le=30, description="passages quoted in the packet"),
+    full_passages: bool = Query(False, description="quote whole chunks instead of short excerpts"),
 ) -> AnswerResponse:
     """The memory packet — the system's designed answer format (task #5).
 
@@ -618,15 +757,17 @@ async def answer_memory(
     from ...services.packets import build_packet
 
     t0 = _time.monotonic()
-    ctx = _context(identity, repo=repo, service=service, agent=agent, workspace=workspace)
+    ctx = _context(identity, repo=repo, service=service, agent=agent, workspace=workspace,
+                   topic_grant=grant_from_headers(request.headers, identity.user_id))
     res = await get_retrieval().resolve(
         session,
         ctx,
         query=q,
         as_of=as_of,
         as_of_mode=as_of_mode,
-        limit=limit,
+        limit=max(limit, max_passages),
         expand=False,
+        per_document=per_document,
     )
     doc_ids = {p.chunk.document_id for p in res.passages}
     doc_meta: dict = {}
@@ -637,6 +778,7 @@ async def answer_memory(
         doc_meta = {
             d.id: {"title": d.title, "valid_at": d.valid_at, "uri": d.uri} for d in rows
         }
+    packet_kw = {"max_passages": max_passages, "excerpt_chars": 0 if full_passages else None}
     markdown, summary = build_packet(
         query=q,
         resolution=res,
@@ -645,14 +787,32 @@ async def answer_memory(
         workspace=workspace,
         agent_mode=agent_mode,
         value_since=await _value_since_map(session, res, ctx=ctx, query=q, as_of=as_of),
+        **packet_kw,
     )
-    from ...services.usage import mark_served
+    promoted: list[str] = []
+    if as_of is None and not res.nodes and not res.passages:
+        # memory v7 WP4 (design §9, promote on demand): nothing in memory answers this; admit the
+        # best few cold items whose titles match, then answer once more. Bounded, logged, governed
+        # by the same salience floor and budget as any document.
+        from ...services.sources import promote_for_question
 
-    await mark_served(
-        session,
-        chunk_ids=summary.pop("served_chunk_ids", []),
-        node_ids=summary.pop("served_node_ids", []),
-    )
+        done = await promote_for_question(session, org_id=identity.org_id, user_id=identity.user_id, query=q)
+        promoted = [f"{d['source']}://{d['ref']}" for d in done if d.get("status") == "processed"]
+        if promoted:
+            res = await get_retrieval().resolve(session, ctx, query=q, limit=limit, expand=False)
+            doc_ids = {p.chunk.document_id for p in res.passages}
+            doc_meta = {d.id: {"title": d.title, "valid_at": d.valid_at, "uri": d.uri}
+                        for d in (await session.execute(_select(Document).where(Document.id.in_(doc_ids)))).scalars()} if doc_ids else {}
+            markdown, summary = build_packet(query=q, resolution=res, doc_meta=doc_meta, as_of=None, workspace=workspace,
+                                             agent_mode=agent_mode, value_since=await _value_since_map(session, res, ctx=ctx, query=q, as_of=None), **packet_kw)
+    from ...services.usage import mark_served, record_served, run_context
+
+    served_node_ids = summary.pop("served_node_ids", [])
+    served_chunk_ids = summary.pop("served_chunk_ids", [])
+    await mark_served(session, chunk_ids=served_chunk_ids, node_ids=served_node_ids)
+    await record_served(session, tenant_id=identity.org_id, run=run_context(request.headers), tool="answer",
+                        node_ids=served_node_ids, chunk_ids=served_chunk_ids)
+    await session.commit()
     synth_ms = None
     served_model = None
     hops = None
@@ -717,6 +877,7 @@ async def answer_memory(
         query=q,
         markdown=markdown,
         took_ms=int((_time.monotonic() - t0) * 1000),
+        promoted=promoted,
         mode=mode,
         synth_model=served_model,
         synth_ms=synth_ms,
@@ -908,6 +1069,130 @@ async def curate_memory(
     }
 
 
+@router.post("/endorse", response_model=EndorseResponse)
+async def endorse_memory(
+    body: EndorseRequest,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    identity: Annotated[AuthIdentity, Depends(require_permission("memory.write"))],
+) -> EndorseResponse:
+    """memory v6 WP13: a person endorses (or withdraws their endorsement of) a memory they can read.
+
+    Endorsement is the one trust signal a join cannot compute. It is stamped on the node
+    (`endorsed_by`, idempotent per person), the tier is recomputed at once so the packet shows
+    `trust:endorsed` without waiting for the nightly job, and a content-free `memory.endorsed`
+    ledger row records who and when. Agents never call this on their own behalf: the verb needs a
+    person's identity.
+    """
+    from sqlalchemy.orm.attributes import flag_modified
+
+    from ...ingest.envelope import Actor, EpisodeEnvelope
+    from ...pipeline.trust import Consequence, trust_record
+    from ...repositories.episodes import insert_episode
+    from ...services.resolution import accessible_scopes
+
+    if not identity.user_id:
+        raise HTTPException(status_code=403, detail="endorsement needs a person's identity")
+    driver = get_driver()
+    readable = {(s.scope.value, s.scope_id) for s in accessible_scopes(_context(identity))}
+    endorsed = withdrawn = unchanged = 0
+    tiers: dict[str, str] = {}
+    for nid in body.node_ids:
+        node = await driver.get_node(session, nid)
+        if node is None or node.org_id != identity.org_id:
+            raise HTTPException(status_code=404, detail=f"node {nid} not found")
+        if (node.scope, node.scope_id) not in readable and node.scope != "global":
+            raise HTTPException(status_code=403, detail=f"node {nid} is outside the scopes you can read")
+        props = dict(node.props or {})
+        who = [u for u in (props.get("endorsed_by") or []) if u]
+        if body.pin:
+            if body.withdraw:
+                props.pop("pinned", None)
+            else:
+                props["pinned"] = True
+            node.props = props
+            flag_modified(node, "props")
+        if body.withdraw:
+            if identity.user_id in who:
+                who.remove(identity.user_id); withdrawn += 1
+            else:
+                unchanged += 1
+        elif identity.user_id in who:
+            unchanged += 1
+        else:
+            who.append(identity.user_id); endorsed += 1
+        props["endorsed_by"] = who
+        old = props.get("trust") or {}
+        props["trust"] = trust_record(
+            grounded=props.get("grounded"), observed_count=node.observed_count or 1,
+            consequence=Consequence(passes=int(old.get("passes") or 0), fails=int(old.get("fails") or 0),
+                                    runs=set(range(int(old.get("runs") or 0)))),
+            endorsed=bool(who))
+        node.props = props
+        flag_modified(node, "props")
+        tiers[nid] = props["trust"]["tier"]
+    if endorsed or withdrawn:
+        env = EpisodeEnvelope(org_id=identity.org_id, scope="org", scope_id=identity.org_id,
+                              actor=Actor(user_id=identity.user_id), source="governance",
+                              action_type="memory.endorsed",
+                              payload={"node_ids": list(body.node_ids), "withdraw": body.withdraw})
+        await insert_episode(session, env.to_episode_kwargs(capture_content=False))
+    await session.commit()
+    return EndorseResponse(endorsed=endorsed, withdrawn=withdrawn, unchanged=unchanged, tiers=tiers)
+
+
+@router.post("/retract", response_model=RetractResponse)
+async def retract_memory(
+    body: RetractRequest,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    identity: Annotated[AuthIdentity, Depends(require_permission("memory.write"))],
+) -> RetractResponse:
+    """memory v7 WP3: a person retracts memories in a scope they may write. The fact is closed at now
+    (status `retracted`, every live edge invalidated), so the current view and the packet drop it while
+    an as-of read before now still reconstructs it. A content-free `memory.retracted` ledger row names
+    who and why. Consent `clear` remains the purge; this is the everyday correction."""
+    from datetime import UTC, datetime
+
+    from sqlalchemy import or_, update
+    from sqlalchemy.orm.attributes import flag_modified
+
+    from ...db.models import Edge
+    from ...ingest.envelope import Actor, EpisodeEnvelope
+    from ...repositories.episodes import insert_episode
+    from ..deps import authorize_write_scope
+
+    if not identity.user_id:
+        raise HTTPException(status_code=403, detail="retraction needs a person's identity")
+    driver = get_driver()
+    now = datetime.now(UTC)
+    retracted = unchanged = 0
+    for nid in body.node_ids:
+        node = await driver.get_node(session, nid)
+        if node is None or node.org_id != identity.org_id:
+            raise HTTPException(status_code=404, detail=f"node {nid} not found")
+        authorize_write_scope(identity, node.scope, node.scope_id)
+        if node.status == "retracted":
+            unchanged += 1
+            continue
+        await session.execute(
+            update(Edge).where(or_(Edge.src_id == nid, Edge.dst_id == nid), Edge.invalid_at.is_(None))
+            .values(invalid_at=now, expired_at=now)
+        )
+        props = dict(node.props or {})
+        props["retracted"] = {"by": identity.user_id, "at": now.isoformat(), "reason": body.reason}
+        node.props = props
+        flag_modified(node, "props")
+        node.status = "retracted"
+        retracted += 1
+    if retracted:
+        env = EpisodeEnvelope(org_id=identity.org_id, scope="org", scope_id=identity.org_id,
+                              actor=Actor(user_id=identity.user_id), source="governance",
+                              action_type="memory.retracted",
+                              payload={"node_ids": list(body.node_ids), "reason": body.reason[:200]})
+        await insert_episode(session, env.to_episode_kwargs(capture_content=False))
+    await session.commit()
+    return RetractResponse(retracted=retracted, unchanged=unchanged)
+
+
 @router.post("/publish", response_model=PublishResponse)
 async def publish_memory(
     body: PublishRequest,
@@ -939,6 +1224,16 @@ async def publish_memory(
         ):
             raise HTTPException(
                 status_code=403, detail="only your own personal memories can be published"
+            )
+        # memory v6 lift rule: personal memory that names a person beyond a role may not be lifted;
+        # the caller redacts and retries, or keeps it personal. Refused loudly, never silently trimmed.
+        from ...services.pii import pii_in_node
+
+        kinds = pii_in_node(node.name, node.summary, node.props)
+        if kinds:
+            raise HTTPException(
+                status_code=422,
+                detail=f"node {nid} names a person ({', '.join(kinds)}); a lift above the person tier is refused",
             )
         existing = await driver.find_node(
             session, identity.org_id, target, node.type, node.key

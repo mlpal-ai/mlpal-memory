@@ -14,7 +14,6 @@ import re
 from abc import ABC, abstractmethod
 from datetime import UTC
 
-from ..core.config import get_settings
 from ..core.logging import get_logger
 from ..core.temporal import windows_overlap
 from ..services.llm_client import LLMClient, get_llm_client
@@ -70,8 +69,9 @@ class GatewayContradictionJudge(ContradictionJudge):
 
 
 def get_judge() -> ContradictionJudge:
-    s = get_settings()
-    if s.dev_auth or s.environment in ("local", "test"):
+    from ..services.llm_client import llm_backend
+
+    if llm_backend() == "dev":
         return DevContradictionJudge()
     return GatewayContradictionJudge(get_llm_client())
 

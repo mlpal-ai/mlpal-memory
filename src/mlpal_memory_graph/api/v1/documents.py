@@ -7,6 +7,8 @@ Chunks (direct tier) plus any inferred entities (derived tier). See design-propo
 
 from __future__ import annotations
 
+import asyncio
+
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -26,9 +28,32 @@ from ...schemas.document import (
     DocumentListResponse,
     DocumentOut,
 )
+from ...core.config import get_settings
+from ...core.logging import get_logger
+from ...services.metrics import REGISTRY
+from ...services.resilience import ModelUnavailable
 from ..deps import AuthIdentity, authorize_write_scope, get_updater, require_permission
 
+log = get_logger(__name__)
 router = APIRouter(prefix="/documents", tags=["documents"])
+
+
+_ingest_slots: asyncio.Semaphore | None = None
+
+
+def ingest_slots() -> asyncio.Semaphore:
+    """memory v9 round 3: the synchronous fold runs inside the request, so the number in flight is
+    bounded per process; past the bound the caller gets 503 + Retry-After at once rather than a
+    queue that grows until Postgres gives up (three crash recoveries on the laptop, 2026-09-18)."""
+    global _ingest_slots
+    if _ingest_slots is None:
+        _ingest_slots = asyncio.Semaphore(max(1, int(get_settings().ingest_concurrency)))
+    return _ingest_slots
+
+
+def reset_ingest_slots() -> None:  # tests
+    global _ingest_slots
+    _ingest_slots = None
 
 
 @router.post("", status_code=202, response_model=DocumentIngestResponse)
@@ -69,15 +94,39 @@ async def ingest_document(
             event_id=env.event_id, scope=env.scope, scope_id=env.scope_id, status="duplicate"
         )
     episode = await session.get(Episode, env.event_id)
-    result = await get_updater().process_episode(session, episode)
+    slots = ingest_slots()
+    if slots.locked():
+        REGISTRY.inc("ingest_rejected", reason="saturated")
+        # the episode is stored (processed=false): the worker folds it later; the caller may also retry
+        await session.commit()
+        raise HTTPException(status_code=503, detail="ingest saturated; the document is queued for the worker",
+                            headers={"Retry-After": "2"})
+    async with slots:
+        try:
+            result = await get_updater().process_episode(session, episode)
+        except ModelUnavailable as exc:
+            # memory v9 round 3: a model outage is not a bad document — keep the episode for the
+            # worker (which defers while the breaker is open) and tell the caller it is queued
+            await session.rollback()
+            await insert_episode(session, kwargs)
+            await session.commit()
+            REGISTRY.inc("ingest_queued", reason=exc.reason)
+            log.warning("ingest.queued", event_id=env.event_id, client=exc.client, reason=exc.reason)
+            return DocumentIngestResponse(event_id=env.event_id, scope=env.scope, scope_id=env.scope_id, status="queued", reason=str(exc)[:160])
 
     status = "processed"
-    if result.get("dropped"):
-        status = (
-            "policy_dropped" if not result["dropped"].startswith("consent") else "consent_blocked"
-        )
+    reason = result.get("dropped")
+    if reason:
+        if reason.startswith("consent"):
+            status = "consent_blocked"
+        elif reason.startswith(("salience:", "budget:")):
+            status = "declined"   # memory v7 WP4: below the salience floor or over the source's daily budget
+        else:
+            status = "policy_dropped"
     return DocumentIngestResponse(
-        event_id=env.event_id, scope=episode.scope, scope_id=episode.scope_id, status=status
+        event_id=env.event_id, scope=episode.scope, scope_id=episode.scope_id, status=status, reason=reason,
+        salience=(episode.payload or {}).get("salience") or None,
+        timings_ms=result.get("timings_ms") or None,
     )
 
 

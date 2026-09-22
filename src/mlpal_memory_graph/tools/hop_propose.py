@@ -47,16 +47,28 @@ async def _current_facts(session, org: str, hop: str) -> list[Fact]:
     return facts
 
 
-def _parse_tunable(spec: str | None) -> dict[str, tuple[float, float]] | None:
-    """'verification.selfCheck.minEdits=1:10,routing.escalation.patience=1:4'"""
+def _parse_tunable(spec: str | None) -> dict[str, tuple[float, float] | frozenset[str]] | None:
+    """Numeric: 'verification.selfCheck.minEdits=1:10'. Enum-set (hop-v1.1 §6, e.g. the
+    main-loop tier): 'model.main=frontier|max'. Comma-separated entries."""
     if not spec:
         return None
-    out: dict[str, tuple[float, float]] = {}
+    out: dict[str, tuple[float, float] | frozenset[str]] = {}
     for item in spec.split(","):
         path, _, rng = item.strip().partition("=")
+        if "|" in rng or (rng and ":" not in rng and not _is_number(rng)):
+            out[path] = frozenset(x.strip() for x in rng.split("|") if x.strip())
+            continue
         lo, _, hi = rng.partition(":")
         out[path] = (float(lo or "-inf"), float(hi or "inf"))
     return out
+
+
+def _is_number(x: str) -> bool:
+    try:
+        float(x)
+        return True
+    except ValueError:
+        return False
 
 
 async def _run(org: str, hop: str, tier_order: tuple[str, ...], out: str | None,

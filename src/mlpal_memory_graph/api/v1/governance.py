@@ -126,6 +126,8 @@ async def set_policy(
         "deny_sources": body.deny_sources,
         "allow_sources": body.allow_sources,
         "metadata_deny": body.metadata_deny,
+        **({"min_salience": body.min_salience} if body.min_salience is not None else {}),
+        **({"source_budget_per_day": body.source_budget_per_day} if body.source_budget_per_day else {}),
     }
     if row is None:
         row = ExtractionPolicy(org_id=org_id, scope=scope, scope_id=scope_id, policy=policy)

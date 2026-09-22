@@ -37,6 +37,9 @@ class Settings(BaseSettings):
     auth_service_url: str = ""
     internal_service_api_key: str = "dev-internal-key"
     dev_auth: bool = True
+    # A self-hosted instance authenticates against this key file (core/api_keys.py) instead of
+    # the platform auth service. Empty -> the mlpal_auth SDK is required outside local envs.
+    api_keys_file: str = ""
 
     # --- embeddings ---
     # provider: auto (dev embedder in local/test, gateway otherwise) | dev | local | gateway.
@@ -44,6 +47,36 @@ class Settings(BaseSettings):
     # no gateway key required); vectors are zero-padded to embeddings_dim, which preserves
     # cosine ranking and keeps one column dimension across spaces (D2 stamps the space name).
     embeddings_provider: str = "auto"
+    # memory v7 WP14: the local ONNX embedder measured in the container (10 vCPU, bge-small):
+    # 4 intra-op threads × batches of 16 ≈ 20 chunks/s; 10 threads with four documents embedding
+    # at once (the ingest concurrency) fell to 2–5 chunks/s from oversubscription. One embedding
+    # call at a time, modest threads, fixed batches.
+    embeddings_threads: int = 4
+    embeddings_batch_size: int = 16
+    # how many embedding batches may run at once (a 32-vCPU box takes 4 × 8 threads; a laptop 1 × 4)
+    embeddings_concurrency: int = 1
+    # memory v9 round 3 — model-client resilience and ingest bounds
+    embeddings_timeout_s: float = 30.0
+    llm_timeout_s: float = 60.0
+    model_retry_attempts: int = 3        # bounded retries on timeout / 429 / 5xx, jittered backoff
+    model_breaker_failures: int = 5      # consecutive failures that open a client's breaker
+    model_breaker_open_s: float = 30.0   # fail-fast window before one probe is let through
+    ingest_concurrency: int = 8          # synchronous document folds in flight per process; beyond it: 503 + Retry-After
+    # memory v7 WP14: chunking of oversize paragraphs is line-aware (never mid-turn); overlap measured
+    # neutral on LongMemEval-S (0.817 vs 0.850 on 60, within noise) at +16 % chunks, so it is off by default
+    chunk_overlap_lines: int = 0
+    # paragraph (fixed cuts inside an oversize paragraph; measured better than line) | line (whole
+    # lines, optional overlap) | turn (memory v9 C2: whole speaker turns, continuation pieces re-prefixed)
+    chunk_mode: str = "paragraph"
+    # Speaker boost on the direct tier: a passage's fused score is multiplied by this when it carries
+    # the speaker the question is about (1.0 = off). memory v8 C1 (LEARNINGS L18): assistant list
+    # items outranked the user's own statement on user-fact questions. C6 (L30–L33): 1.3 in
+    # "question" mode measured +5 on LongMemEval oracle-100 and level on S-18 against no boost; the
+    # plain user-turn boost (mode "user") lost 2 on S.
+    direct_user_turn_boost: float = 1.3
+    # "user": the boost always favours user turns (C1). "question": it favours assistant turns when
+    # the question asks what the assistant said or recommended, user turns otherwise (C6).
+    direct_speaker_boost_mode: str = "question"
     embeddings_service_url: str = ""
     embeddings_model: str = "text-embedding-3-small"
     embeddings_local_model: str = "BAAI/bge-small-en-v1.5"
@@ -80,10 +113,22 @@ class Settings(BaseSettings):
     # --- extraction: rule | llm ---
     # "rule" = deterministic only (cheap path). "llm" = also run the LLM extractor + contradiction
     # judge on content-bearing high-salience episodes (the cost-tiered 'full' tier).
+    # "facts" (memory v8 C3/C5) = one call per content episode producing dated self-contained fact
+    # sentences beside the passages; no contradiction judge (measured net zero, not a default).
+    # "topics" (memory v9 C4) = one call per content episode, facts attached to topics and folded
+    # into one running state per topic as keyed state (`state:conv/<topic>:<user>`).
     extractor: str = "rule"
     # cheap Claude (Haiku-class) via gateway; full dated tag — the public gateway 400s
     # on bare aliases (learned in x2)
     llm_model: str = "claude-haiku-4-5-20251001"
+    # memory v7 WP11: the chat client speaks OpenAI's /v1/chat/completions; any compatible server
+    # works. provider=gateway (default) sends the MLPal key as before; provider=openai-compatible
+    # sends `Authorization: Bearer <llm_api_key>` (or nothing) — e.g. Ollama at
+    # http://localhost:11434 with llm_model=llama3.1, fully offline. Empty base_url = the gateway.
+    llm_provider: str = "gateway"
+    llm_base_url: str = ""
+    # gateway | dev | auto (gateway whenever a key is configured, else the offline stubs)
+    llm_mode: str = "auto"
     llm_max_tokens: int = 1500
     # provenance stamped on every LLM-extracted fact so a write is auditable/replayable. Bump
     # prompt_version when the extraction prompt changes, extraction_version for code/schema changes.
@@ -100,6 +145,20 @@ class Settings(BaseSettings):
     # --- retention (DIRECT tier only — episodes/chunks; never derived facts) ---
     direct_retention_days: int = 0  # 0 = keep forever (off)
     retention_interval_seconds: int = 3600  # how often the worker runs the purge
+    # memory v7 WP4: files sources may only be registered under this root (the container mounts the
+    # company's document share here read-only); a registration outside it is refused.
+    sources_root: str = "/sources"
+    promote_on_demand_max_items: int = 3
+    # memory v7 WP1: trust by consequence joined on a clock, not by hand. Every org with a run
+    # verdict in the window gets its tiers recomputed at most this often (idempotent; under the lock).
+    trust_join_enabled: bool = True
+    trust_join_interval_seconds: int = 86400
+    trust_join_window_days: int = 30
+    # memory v10: nightly, deterministic curation of the workspace notes (stale threads closed,
+    # current-state block rebuilt from the injected state topics); Decisions/Preferences untouched
+    notes_curation_enabled: bool = True
+    notes_curation_interval_seconds: int = 86400
+    notes_thread_ttl_days: int = 14
 
     # --- v3 lifecycle: working-tier TTL (session-scoped memories; committed = durable) ---
     working_ttl_days: int = 14
@@ -136,8 +195,9 @@ class Settings(BaseSettings):
             errors.append("dev_auth=true is forbidden outside local/test (MLPAL_DEV_AUTH=false)")
         if self.internal_service_api_key == "dev-internal-key":
             errors.append("internal_service_api_key is the well-known default; set a real secret")
-        if not has_auth_sdk:
-            errors.append("mlpal_auth SDK is not importable; production auth would fail open")
+        if not has_auth_sdk and not self.api_keys_file:
+            errors.append("no auth backend: the mlpal_auth SDK is not importable and "
+                          "MLPAL_API_KEYS_FILE is unset; production auth would fail open")
         if self.debug:
             errors.append("debug=true is forbidden outside local/test (SQL echo, reload)")
         return errors

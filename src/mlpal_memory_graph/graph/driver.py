@@ -118,6 +118,7 @@ class GraphDriver(ABC):
         type_: str | None = None,
         sources: list[str] | None = None,
         limit: int = 10,
+        at=None,
     ) -> list[ScoredNode]:
         """Search across the given accessible scopes only, optionally restricted to
         ``sources``. An empty ``scopes`` returns nothing — never a tenant-wide scan."""
@@ -133,6 +134,7 @@ class GraphDriver(ABC):
         type_: str | None = None,
         sources: list[str] | None = None,
         limit: int = 10,
+        at=None,
     ) -> list[ScoredNode]:
         """The hybrid lexical leg: weighted FTS + pg_trgm (identifier recall) on Postgres, a
         portable token-overlap score elsewhere. Scope is a hard predicate, as in search_nodes."""

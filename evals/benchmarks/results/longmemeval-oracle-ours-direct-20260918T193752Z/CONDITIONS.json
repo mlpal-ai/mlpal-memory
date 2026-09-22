@@ -1,0 +1,5 @@
+{
+ "write-time LLM": "none (direct arm)",
+ "embedder": "text-embedding-3-small via the MLPal gateway (MLPAL_EMBEDDINGS_PROVIDER=gateway)",
+ "item": "passage (1,000-char chunk) with session date and session id; up to 8 per session"
+}

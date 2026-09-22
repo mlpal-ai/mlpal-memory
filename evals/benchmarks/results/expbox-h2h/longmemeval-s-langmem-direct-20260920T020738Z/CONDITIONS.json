@@ -1,0 +1,8 @@
+{
+ "write-time LLM": "claude-haiku-4-5-20251001 via langchain-anthropic (LangMem memory manager: extract, update; deletes off = default)",
+ "embedder": "text-embedding-3-small via langchain-openai as the store index",
+ "store": "LangGraph InMemoryStore per run, one namespace per haystack (LangMem's reference setup)",
+ "item": "memory item content written by the manager; session = the session whose invocation created it",
+ "ingest unit": "one manager invocation per session with the session's chat messages, session-date line prefixed",
+ "search": "store.search(namespace, query, limit=k) \u2014 semantic index only"
+}

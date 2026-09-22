@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class NodeOut(BaseModel):
@@ -61,10 +61,22 @@ class PassageOut(BaseModel):
     valid_at: datetime | None = None
 
 
+class FusedHit(BaseModel):
+    """memory v7 WP11: one ranked list across both tiers (facts and verbatim passages), RRF-fused."""
+
+    kind: str  # node | passage
+    id: str
+    score: float
+
+
 class SearchResponse(BaseModel):
     nodes: list[NodeOut]  # derived (inferred) facts
     edges: list[EdgeOut]
     passages: list[PassageOut] = []  # direct (verbatim) memory
+    fused: list[FusedHit] | None = None  # present when ?fusion=rrf
+    took_ms: int | None = None
+    timings_ms: dict[str, int] | None = None  # where the read spent its time (derived/direct tiers, embed, legs)
+    degraded: list[str] | None = None  # memory v9: legs that fell away for this read ("vector" when the embedder was down)
 
 
 class ProjectionResponse(BaseModel):
@@ -74,6 +86,21 @@ class ProjectionResponse(BaseModel):
     estimated_tokens: int
     fact_count: int
     truncated: bool
+    took_ms: int | None = None
+
+
+class ProfileResponse(BaseModel):
+    """memory v7 WP11: the person's profile in one call — stable facts (preferences, current state
+    the HOP injects) and recent activity (what they wrote and read lately, content-free), plus the
+    learnings they would see first. The projection is its Markdown rendering."""
+
+    markdown: str
+    preferences: list[dict]
+    state: list[dict]
+    learnings: list[dict]
+    recent: list[dict]
+    estimated_tokens: int
+    took_ms: int
 
 
 class ExplainResponse(BaseModel):
@@ -129,6 +156,8 @@ class AnswerResponse(BaseModel):
     hop_trace: list[str] | None = None
     # server-enforced grounding: citations stripped because they were never retrieved
     invented_citations: int = 0
+    # memory v7 WP4: cold source items admitted to answer this question (promote on demand)
+    promoted: list[str] = []
     took_ms: int
 
 
@@ -171,3 +200,31 @@ class StoreStats(BaseModel):
     # active embedding space {name, quality, dim} — evals record it so every number
     # is attributable to the space that produced it (D2)
     embedder: dict = {}
+
+
+class EndorseRequest(BaseModel):
+    """memory v6 §6: a person's yes. Rare, decisive; the only signal a nightly join cannot compute."""
+
+    node_ids: list[str]
+    withdraw: bool = False  # remove the caller's own endorsement
+    pin: bool = False  # memory v10: also pin the memory into every session's projection (withdraw + pin unpins)
+
+
+class RetractRequest(BaseModel):
+    """memory v7 WP3: a person takes a memory back. The fact is closed at now (bitemporal), never
+    deleted: the as-of view keeps it, the current view and the packet drop it, a ledger row says who."""
+
+    node_ids: list[str]
+    reason: str = Field(..., min_length=3, max_length=500)
+
+
+class RetractResponse(BaseModel):
+    retracted: int
+    unchanged: int
+
+
+class EndorseResponse(BaseModel):
+    endorsed: int
+    withdrawn: int
+    unchanged: int
+    tiers: dict[str, str]  # node id -> tier after the change
