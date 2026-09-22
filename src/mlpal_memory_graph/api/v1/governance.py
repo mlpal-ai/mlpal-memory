@@ -30,8 +30,11 @@ log = get_logger(__name__)
 
 
 def _authorize_scope_write(identity: AuthIdentity, scope: Scope, scope_id: str) -> None:
-    """A user governs only their own personal scope; org/team requires admin."""
+    """A user governs only their own personal scope; a unit is governed by its admins (or an
+    admin above it, memory v12 §2b); org and everything else requires a memory admin."""
     if scope is Scope.USER and scope_id == identity.user_id:
+        return
+    if scope is Scope.TEAM and scope_id in identity.administered_units:
         return
     if identity.is_admin():
         return

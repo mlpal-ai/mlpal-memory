@@ -127,6 +127,10 @@ export interface SearchResponse {
   nodes: NodeOut[];
   edges: EdgeOut[];
   passages: PassageOut[];
+  took_ms?: number | null;
+  /** Legs that fell away for this read: ["vector"] when the embedder was down and
+   * the results come from the lexical legs only (memory v9). */
+  degraded?: string[] | null;
 }
 
 export type AnswerMode = "packet" | "synthesized" | "hybrid" | "hop";
@@ -166,6 +170,7 @@ export interface StoreStats {
   by_status: Record<string, number>;
   top_workspaces: Array<{ workspace: string; nodes: number }>;
   contested: number;
+  embedder?: Record<string, unknown>;
 }
 
 /** One value a watched metric held, with its bitemporal validity window. */
@@ -395,7 +400,7 @@ function buildQuery(params: Params): string {
 async function request<T>(
   path: string,
   params: Params = {},
-  init: { method?: "POST" | "DELETE"; body?: unknown } = {},
+  init: { method?: "POST" | "PUT" | "DELETE"; body?: unknown } = {},
 ): Promise<T> {
   let resp: Response;
   try {
@@ -581,4 +586,190 @@ export async function streamAnswer(
     if ((e as Error).name === "AbortError") return;
     throw e;
   }
+}
+
+// ── trust: endorse / pin / retract (memory v6 WP13, v10) ────────────────────
+
+export interface EndorseResponse {
+  endorsed: number;
+  withdrawn: number;
+  unchanged: number;
+  /** node id -> trust tier after the change (probation | corroborated | endorsed) */
+  tiers: Record<string, string>;
+}
+
+export interface RetractResponse {
+  retracted: number;
+  unchanged: number;
+}
+
+/** A person endorses (or withdraws) a memory; `pin` also puts it in the reserved
+ * slice of every session's projection (withdraw + pin unpins). */
+export function endorseNodes(
+  nodeIds: string[],
+  opts: { withdraw?: boolean; pin?: boolean } = {},
+): Promise<EndorseResponse> {
+  return request<EndorseResponse>("/memory/endorse", {}, {
+    method: "POST",
+    body: { node_ids: nodeIds, withdraw: opts.withdraw ?? false, pin: opts.pin ?? false },
+  });
+}
+
+/** Soft delete with a reason: the as-of view keeps it, the current view and the
+ * packet drop it, a ledger row says who. */
+export function retractNodes(nodeIds: string[], reason: string): Promise<RetractResponse> {
+  return request<RetractResponse>("/memory/retract", {}, {
+    method: "POST",
+    body: { node_ids: nodeIds, reason },
+  });
+}
+
+// ── the person's profile (what a HOP injects at session start) ──────────────
+
+export interface ProfileResponse {
+  markdown: string;
+  preferences: Record<string, unknown>[];
+  state: Record<string, unknown>[];
+  learnings: Record<string, unknown>[];
+  recent: Record<string, unknown>[];
+  estimated_tokens: number;
+  took_ms: number;
+}
+
+export function getProfile(params: { hop?: string; workspace?: string } = {}): Promise<ProfileResponse> {
+  return request<ProfileResponse>("/memory/profile", { ...params });
+}
+
+// ── workspace notes (mirror schemas/notes.py) ───────────────────────────────
+
+export const NOTE_SECTIONS = ["Now", "Decisions", "Open threads", "Preferences", "Pointers"] as const;
+
+export interface NoteSummary {
+  id: string;
+  scope: string;
+  scope_id: string;
+  workspace: string;
+  title: string | null;
+  version: number;
+  updated_by: string | null;
+  updated_at: string | null;
+  chars: number;
+}
+
+export interface NoteOut extends Omit<NoteSummary, "chars"> {
+  body: string;
+  sections: Record<string, string>;
+  as_of: string | null;
+  stale_citations: Array<{ citation: string; reason?: string }>;
+}
+
+export interface NoteVersionOut {
+  version: number;
+  updated_by: string | null;
+  reason: string | null;
+  created_at: string | null;
+  chars: number;
+}
+
+export function listNotes(): Promise<{ notes: NoteSummary[] }> {
+  return request<{ notes: NoteSummary[] }>("/notes");
+}
+
+export function getNote(scope: string, scopeId: string, workspace: string): Promise<NoteOut> {
+  return request<NoteOut>(
+    `/notes/${encodeURIComponent(scope)}/${encodeURIComponent(scopeId)}`,
+    { workspace },
+  );
+}
+
+/** Whole-note write with optimistic concurrency: `baseVersion` is the version
+ * that was read; a newer one on the server is a 409. */
+export function putNote(
+  scope: string,
+  scopeId: string,
+  workspace: string,
+  body: { body: string; reason?: string; base_version?: number; title?: string },
+): Promise<NoteOut> {
+  return request<NoteOut>(
+    `/notes/${encodeURIComponent(scope)}/${encodeURIComponent(scopeId)}`,
+    { workspace },
+    { method: "PUT", body },
+  );
+}
+
+export function noteHistory(
+  scope: string,
+  scopeId: string,
+  workspace: string,
+): Promise<{ note_id: string; versions: NoteVersionOut[] }> {
+  return request<{ note_id: string; versions: NoteVersionOut[] }>(
+    `/notes/${encodeURIComponent(scope)}/${encodeURIComponent(scopeId)}/history`,
+    { workspace },
+  );
+}
+
+// ── HOP registry + the owner's tune door (mirror schemas/registry.py) ───────
+
+export interface HopOut {
+  name: string;
+  version: string | null;
+  owner: string | null;
+  mode: string;
+  sharing: string;
+  tenant: string | null;
+  workspace: string | null;
+  topics: Array<Record<string, unknown>>;
+  reads: string[];
+  writes: string[];
+  ontology: Array<Record<string, unknown>>;
+}
+
+export interface TuneProposalItem {
+  kind?: string;
+  knob?: string;
+  change?: Record<string, unknown>;
+  applicability?: string;
+  rationale?: string;
+  evidence?: unknown;
+}
+
+export interface TuneProposal {
+  id: string;
+  at: string;
+  actor: string | null;
+  status: string; // pending | approve | reject | edit
+  decision: { decision?: string; reason?: string; actor?: string; installed_version?: string } | null;
+  hop: string;
+  turn: string;
+  from_version: string;
+  candidate_version: string | null;
+  candidate_path: string | null;
+  twins: string[];
+  summary: string;
+  proposals: TuneProposalItem[];
+  verdict: Record<string, unknown> | null;
+  facts: Array<Record<string, unknown>>;
+  cost_usd: number | null;
+}
+
+export function listHops(): Promise<{ hops: HopOut[]; ontology_extension: Record<string, unknown> }> {
+  return request("/memory/hops");
+}
+
+export function tunePending(hop?: string): Promise<{ pending: TuneProposal[] }> {
+  return request("/memory/tune/pending", { hop });
+}
+
+export function tuneProposals(hop?: string): Promise<{ pending: TuneProposal[] }> {
+  return request("/memory/tune/proposals", { hop });
+}
+
+export function tuneDecide(body: {
+  hop: string;
+  turn: string;
+  decision: "approve" | "reject";
+  reason?: string;
+  installed_version?: string;
+}): Promise<{ turn: string; hop: string; status: string; learning_written: boolean }> {
+  return request("/memory/tune/decide", {}, { method: "POST", body });
 }

@@ -161,7 +161,9 @@ async def write_tune_proposal(
 
     env = EpisodeEnvelope(org_id=identity.org_id, scope="org", scope_id=identity.org_id, source="tune", action_type="tune.proposal",
                           actor=Actor(user_id=identity.user_id), payload=body.model_dump(), content=body.summary)
-    await insert_episode(session, env.to_episode_kwargs(capture_content=True))
+    # the ledger row, not a passage: captured content becomes searchable direct memory, and a tune
+    # proposal's summary is not something an agent should retrieve as evidence (seen in the UI)
+    await insert_episode(session, env.to_episode_kwargs(capture_content=False))
     await session.commit()
     from ...db.models import Episode
 
@@ -215,7 +217,7 @@ async def decide_tune_proposal(
         raise HTTPException(status_code=409, detail=f"{body.turn} already decided: {(decisions[key].payload or {}).get('decision')}")
     env = EpisodeEnvelope(org_id=identity.org_id, scope="org", scope_id=identity.org_id, source="tune", action_type="tune.decision",
                           actor=Actor(user_id=identity.user_id), payload=body.model_dump(), content=body.reason or body.decision)
-    await insert_episode(session, env.to_episode_kwargs(capture_content=True))
+    await insert_episode(session, env.to_episode_kwargs(capture_content=False))  # the reason reaches memory as the learning claim below
     learning = False
     if body.decision in ("reject", "edit") and body.reason.strip():
         base = hop_base(body.hop)

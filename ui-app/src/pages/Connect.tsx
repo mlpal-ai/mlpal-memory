@@ -2,6 +2,7 @@ import { Check, Copy, Plug, ShieldCheck, TerminalSquare } from "lucide-react";
 import { useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
+import { loadIdentity } from "@/lib/api";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
 // Managed routes /mcp through the same ingress as this UI, so same-origin works.
@@ -10,10 +11,18 @@ const ORIGIN = window.location.origin;
 const IS_LOCAL = /localhost|127\.0\.0\.1/.test(ORIGIN);
 const MCP_URL = IS_LOCAL ? "http://localhost:8011/mcp" : `${ORIGIN}/mcp`;
 
-const TOOLS: { name: string; desc: string }[] = [
+const READ_TOOLS: { name: string; desc: string }[] = [
   { name: "memory_answer", desc: "Grounded answer packet for a question: facts, citations, provenance. The tool agents should reach for first." },
   { name: "memory_search", desc: "Hybrid search over documents and facts (vector + lexical + graph)." },
   { name: "memory_get", desc: "Fetch a specific document or node by id for full context." },
+  { name: "memory_document", desc: "A verbatim document with its chunks, by id." },
+  { name: "memory_brief", desc: "The builder's brief for a HOP: its watched facts, learnings, scores and deviations." },
+  { name: "memory_notes", desc: "The workspace notes (Now, Decisions, Open threads, Preferences, Pointers)." },
+];
+const WRITE_TOOLS: { name: string; desc: string }[] = [
+  { name: "memory_write", desc: "A claim with evidence: a learning, a preference, a state value, a pinned fact. Learnings start on probation and earn trust from the runs that see them." },
+  { name: "memory_endorse", desc: "A person's endorsement (or pin). Needs a person's identity; an agent's own endorsement is refused." },
+  { name: "memory_retract", desc: "Soft-delete a memory with a reason; as-of reads keep the history." },
 ];
 
 function CommandBlock({ command }: { command: string }) {
@@ -41,10 +50,12 @@ function CommandBlock({ command }: { command: string }) {
 }
 
 export function Connect() {
-  // Canonical command — the platform dashboard ships the same string verbatim.
-  const addCommand = IS_LOCAL
-    ? `claude mcp add mlpal-memory --transport http ${MCP_URL}`
-    : `claude mcp add mlpal-memory --transport http ${MCP_URL} --header "X-API-Key: <your-key>"`;
+  // Canonical command — the platform dashboard ships the same string verbatim. A local
+  // stack in dev mode needs no key; one with a key file (or the managed service) does.
+  const keyed = !IS_LOCAL || Boolean(loadIdentity().apiKey);
+  const addCommand = keyed
+    ? `claude mcp add mlpal-memory --transport http ${MCP_URL} --header "X-API-Key: <your-key>"`
+    : `claude mcp add mlpal-memory --transport http ${MCP_URL}`;
 
   return (
     <div className="mx-auto flex max-w-3xl flex-col gap-6">
@@ -53,9 +64,9 @@ export function Connect() {
           <Plug className="size-5" /> Connect Claude Code
         </h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          Give any Claude Code session read access to this memory. One command, then the
-          agent answers org questions from memory instead of re-deriving them from files.
-          Reads and export are always free.
+          Give any Claude Code session (or yodex) this memory. One command, then the agent
+          answers org questions from memory instead of re-deriving them from files, and what
+          it learns comes back as governed claims. Reads and export are always free.
         </p>
       </div>
 
@@ -69,9 +80,11 @@ export function Connect() {
           <CommandBlock command={addCommand} />
           {IS_LOCAL ? (
             <p className="text-sm text-muted-foreground">
-              Self-hosted dev mode needs no key. Identity comes from the dev headers this
-              UI already uses. For a production self-host, front the service with your auth
-              and pass the key as an <code>X-API-Key</code> header.
+              Dev mode needs no key: identity comes from the dev headers this UI already uses.
+              For an instance other people reach, mint keys with{" "}
+              <code>python -m mlpal_memory_graph.tools.api_keys new</code>, start the production
+              overlay, and pass the key as the <code>X-API-Key</code> header above (see
+              docs/SELF_HOSTING.md). Each key is pinned to one tenant.
             </p>
           ) : (
             <p className="text-sm text-muted-foreground">
@@ -110,14 +123,28 @@ export function Connect() {
         </CardHeader>
         <CardContent className="flex flex-col gap-2">
           <p className="text-sm text-muted-foreground">
-            The agent-facing connector is <strong>read-only</strong>. Writing to memory
-            happens through ingestion and this UI's curation tools, never through a tool
-            an agent could be prompt-injected into calling.
+            Reads are free and deterministic. Writes are <strong>governed</strong>: every claim
+            carries evidence, a learning is on probation until runs that saw it succeed, a
+            person's endorsement is the one signal an agent cannot compute, and a stop-hook's
+            unprompted learnings reach only their author and HOP. Deletion stays with this UI's
+            curation tools.
           </p>
-          <div className="mt-1 flex flex-col gap-2">
-            {TOOLS.map((t) => (
+          <div className="mt-1 text-xs font-medium text-muted-foreground">Reads</div>
+          <div className="flex flex-col gap-2">
+            {READ_TOOLS.map((t) => (
               <div key={t.name} className="flex items-start gap-2">
                 <Badge variant="outline" className="mt-0.5 shrink-0 font-mono text-[11px]">
+                  {t.name}
+                </Badge>
+                <span className="text-sm text-muted-foreground">{t.desc}</span>
+              </div>
+            ))}
+          </div>
+          <div className="mt-2 text-xs font-medium text-muted-foreground">Governed writes</div>
+          <div className="flex flex-col gap-2">
+            {WRITE_TOOLS.map((t) => (
+              <div key={t.name} className="flex items-start gap-2">
+                <Badge variant="info" className="mt-0.5 shrink-0 font-mono text-[11px]">
                   {t.name}
                 </Badge>
                 <span className="text-sm text-muted-foreground">{t.desc}</span>

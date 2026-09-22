@@ -41,6 +41,18 @@ self-hosted instance can run outside dev mode.
 - Nightly deterministic curation of the workspace note: stale open threads closed against the
   graph, a bounded current-state block rebuilt from injected state topics.
 
+### Memory explorer UI
+- Two pages the API had outgrown: **Notes** (the workspace note's five sections, edit with
+  optimistic concurrency, version history, citations open the node) and **HOPs** (the registry,
+  tune proposals pending the owner's decision with reject-with-reason, the decided history).
+- A memory's trust verbs on its detail panel: endorse or withdraw, pin or unpin, retract with a
+  reason; trust tier and pinned badges.
+- Search shows when the vector leg was unavailable and how long the read took. The Connect page
+  lists the MCP's real tool surface (six reads, three governed writes) and the key-file setup.
+- Tune proposals and decisions no longer surface as searchable passages (they are ledger rows;
+  a rejection reaches memory as the build learning).
+- The service reports its installed version (`/health`) instead of a stale constant.
+
 ### Evaluation
 - Public benchmark kit (`evals/benchmarks/`): LongMemEval, LoCoMo and ConvoMem through the public
   API, plus adapters for mem0, Memobase, supermemory, LangMem, Graphiti and Cognee under one

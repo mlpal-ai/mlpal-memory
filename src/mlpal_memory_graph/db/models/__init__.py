@@ -11,9 +11,12 @@ from .node import Node
 from .note import Note, NoteVersion
 from .hop import MemoryHop
 from .source import MemorySource, SourceItem
+from .unit import Unit, UnitMember
 from .watermark import MemoryWatermark
 
 __all__ = [
+    "Unit",
+    "UnitMember",
     "Base",
     "SCHEMA",
     "new_uuid",

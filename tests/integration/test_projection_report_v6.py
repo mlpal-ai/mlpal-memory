@@ -26,14 +26,14 @@ async def test_projection_leads_with_preferences_and_injected_state(client, sess
     await _claim(client, "preference", "person/priya/pref/infra", "cost_format", "table", scope="user")
     await _claim(client, "preference", "person/priya/pref", "channel", "email", scope="user")
     await _claim(client, "state", "infra/state/cost-daily", "2026-09-15", "sent 15:57Z; MTD $398")
-    await _claim(client, "state", "infra/state/identity", "account", "024249678939")
+    await _claim(client, "state", "infra/state/identity", "account", "123456789012")
     await _claim(client, "learning", "infra/learning", "dedup", "Always pass --context to kubectl on this machine; the default points at the old account.")
     r = await client.get("/api/v1/memory/projection", params={"hop": "infra", "inject": "infra/state/cost-daily,infra/state/identity", "workspace": "infra"}, headers=H)
     assert r.status_code == 200, r.text
     md = r.json()["markdown"]
     assert md.index("## Preferences (yours)") < md.index("## State (current)")
     assert "- cost_format: table" in md and "- channel: email" in md
-    assert "infra/state/cost-daily:2026-09-15 = sent 15:57Z; MTD $398" in md and "infra/state/identity:account = 024249678939" in md
+    assert "infra/state/cost-daily:2026-09-15 = sent 15:57Z; MTD $398" in md and "infra/state/identity:account = 123456789012" in md
     assert "Always pass --context" in md
     # another user sees no preferences of priya's
     other = await client.get("/api/v1/memory/projection", params={"hop": "infra"}, headers={**H, "X-Test-User-Id": "marco"})

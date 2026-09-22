@@ -11,7 +11,7 @@ import asyncio
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -58,13 +58,14 @@ def reset_ingest_slots() -> None:  # tests
 
 @router.post("", status_code=202, response_model=DocumentIngestResponse)
 async def ingest_document(
+    request: Request,
     body: DocumentIngestRequest,
     session: Annotated[AsyncSession, Depends(get_session)],
     identity: Annotated[AuthIdentity, Depends(require_permission("memory.write"))],
 ) -> DocumentIngestResponse:
     # Same hard gate as episodes: non-privileged callers write only their own USER scope
     # or ORG; subject scopes (team/repo/service/agent) require service key or org admin.
-    authorize_write_scope(identity, body.scope.value, body.scope_id)
+    authorize_write_scope(identity, body.scope.value, body.scope_id, hop=request.headers.get("x-hop"))
 
     payload: dict = {}
     if body.title:
@@ -315,3 +316,70 @@ async def get_document(
             for c in chunks
         ],
     )
+
+
+UPLOAD_MAX_BYTES = 20 * 1024 * 1024
+_TEXT_SUFFIXES = (".md", ".markdown", ".txt", ".rst", ".csv", ".json", ".yaml", ".yml", ".log")
+
+
+def _text_of_upload(filename: str, data: bytes) -> str:
+    """The verbatim text of an uploaded file: text-like files decoded, PDFs extracted page by
+    page (pypdf, the `pdf` extra). Anything else is refused: memory stores text it can cite."""
+    name = (filename or "").lower()
+    if name.endswith(".pdf"):
+        try:
+            from io import BytesIO
+
+            from pypdf import PdfReader
+        except ImportError as exc:  # pragma: no cover - depends on the install
+            raise HTTPException(status_code=415, detail="PDF uploads need the `pdf` extra (pypdf)") from exc
+        try:
+            pages = [(page.extract_text() or "").strip() for page in PdfReader(BytesIO(data)).pages]
+        except Exception as exc:  # noqa: BLE001 - a corrupt file is the caller's problem, said plainly
+            raise HTTPException(status_code=422, detail=f"could not read the PDF: {exc}") from exc
+        text = "\n\n".join(p for p in pages if p)
+        if not text.strip():
+            raise HTTPException(status_code=422, detail="the PDF has no extractable text (scanned? run OCR first)")
+        return text
+    if name.endswith(_TEXT_SUFFIXES) or not name:
+        try:
+            return data.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise HTTPException(status_code=415, detail="text uploads must be UTF-8") from exc
+    raise HTTPException(status_code=415, detail=f"unsupported file type: {filename!r} (text, markdown or PDF)")
+
+
+@router.post("/upload", status_code=202, response_model=DocumentIngestResponse)
+async def upload_document(
+    request: Request,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    identity: Annotated[AuthIdentity, Depends(require_permission("memory.write"))],
+    file: UploadFile = File(...),
+    scope: str = Form("org"),
+    scope_id: str | None = Form(None),
+    workspace: str | None = Form(None),
+    title: str | None = Form(None),
+    source: str = Form("upload"),
+    valid_at: str | None = Form(None),
+) -> DocumentIngestResponse:
+    """memory v12 §6: the second door for sources when nobody runs a collector — a file dropped
+    in the UI. The same ingest as `POST /documents`; the file's text is the document, its name
+    the title and uri when none is given."""
+    data = await file.read()
+    if len(data) > UPLOAD_MAX_BYTES:
+        raise HTTPException(status_code=413, detail=f"file larger than {UPLOAD_MAX_BYTES // (1024 * 1024)} MB")
+    if not data:
+        raise HTTPException(status_code=422, detail="empty file")
+    from datetime import datetime
+
+    body = DocumentIngestRequest(
+        content=_text_of_upload(file.filename or "", data),
+        title=title or file.filename,
+        scope=scope,  # validated by the schema
+        scope_id=scope_id,
+        source=source,
+        uri=file.filename,
+        workspace=workspace,
+        valid_at=datetime.fromisoformat(valid_at) if valid_at else None,
+    )
+    return await ingest_document(request, body, session, identity)

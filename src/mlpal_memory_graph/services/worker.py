@@ -95,6 +95,7 @@ class MemoryUpdateWorker(PollWorker):
         self._last_retention = float("-inf")
         self._last_trust_join = float("-inf")
         self._last_notes_curation = float("-inf")
+        self._last_units_lift = float("-inf")
 
     async def tick(self) -> None:
         factory = get_session_factory()
@@ -120,6 +121,7 @@ class MemoryUpdateWorker(PollWorker):
                 await self._close_expired_committed(s0)  # v7: writer-set expiry, closed not deleted
                 await self._maybe_trust_join(s0)  # v7: nightly consequence join, single-writer
                 await self._maybe_curate_notes(s0)  # memory v10: nightly note curation, deterministic
+                await self._maybe_lift_units(s0)  # memory v12: nightly roll-up by unit policy
             finally:
                 # If the unlock itself fails, the pooled connection would silently keep
                 # the session-level lock and every future tick would no-op. Invalidate
@@ -301,3 +303,27 @@ class MemoryUpdateWorker(PollWorker):
                     error=ep.error,
                 )
             await s2.commit()
+
+    async def _maybe_lift_units(self, session) -> None:
+        """memory v12 §2b: lift each unit's learnings one level up by its policy, per tenant, at most
+        every units_lift_interval_seconds. Deterministic; every lift is a ledger row."""
+        import time
+
+        if not self.settings.units_lift_enabled:
+            return
+        if time.monotonic() - self._last_units_lift < self.settings.units_lift_interval_seconds:
+            return
+        self._last_units_lift = time.monotonic()
+        from sqlalchemy import select
+
+        from ..db.models import Unit
+        from .units_lift import lift_by_policy
+
+        orgs = (await session.execute(select(Unit.org_id).distinct())).scalars().all()
+        for org in orgs:
+            try:
+                await lift_by_policy(session, org_id=org)
+                await session.commit()
+            except Exception as exc:  # noqa: BLE001 — one tenant's failure must not stop the others
+                await session.rollback()
+                log.error("units.lift_failed", org=org, error=str(exc))

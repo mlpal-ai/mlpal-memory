@@ -124,6 +124,17 @@ export function Search() {
         </Card>
       ) : (
         <>
+          {result.degraded && result.degraded.length > 0 && (
+            <div className="rounded-lg border border-[var(--warning)]/40 bg-[var(--warning-bg)] px-4 py-2.5 text-sm text-[var(--warning)]">
+              The {result.degraded.join(", ")} leg was unavailable for this search (the embedder
+              is down); these results come from lexical matching only.
+            </div>
+          )}
+          {result.took_ms != null && (
+            <p className="-mt-3 text-xs tabular-nums text-muted-foreground">
+              {result.nodes.length} facts · {result.passages.length} passages · {result.took_ms} ms
+            </p>
+          )}
           {result.nodes.length > 0 && (
             <section className="flex flex-col gap-2">
               <h2 className="text-sm font-semibold text-muted-foreground">

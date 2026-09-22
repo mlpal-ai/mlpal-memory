@@ -6,7 +6,9 @@ import { Connect } from "@/pages/Connect";
 import { Documents } from "@/pages/Documents";
 import { Episodes } from "@/pages/Episodes";
 import { Graph } from "@/pages/Graph";
+import { Hops } from "@/pages/Hops";
 import { Manage } from "@/pages/Manage";
+import { Notes } from "@/pages/Notes";
 import { Overview } from "@/pages/Overview";
 import { Search } from "@/pages/Search";
 import { Timeline } from "@/pages/Timeline";
@@ -22,6 +24,8 @@ export default function App() {
         <Route path="/documents" element={<Documents />} />
         <Route path="/episodes" element={<Episodes />} />
         <Route path="/timeline" element={<Timeline />} />
+        <Route path="/notes" element={<Notes />} />
+        <Route path="/hops" element={<Hops />} />
         <Route path="/manage" element={<Manage />} />
         <Route path="/graph" element={<Graph />} />
         <Route path="/connect" element={<Connect />} />

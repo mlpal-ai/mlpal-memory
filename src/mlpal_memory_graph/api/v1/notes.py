@@ -46,12 +46,14 @@ def _visible(identity: AuthIdentity, scope: str, scope_id: str) -> bool:
         return scope_id == identity.org_id
     if scope == Scope.USER.value:
         return scope_id == identity.user_id
-    return False  # team/service/repo/agent notes: not in v1
+    if scope == Scope.TEAM.value:
+        return scope_id in identity.team_ids  # memory v12 §2b: a unit's note reads like its memory
+    return False  # service/repo/agent notes: not in v1
 
 
 def _check_scope(scope: str) -> None:
-    if scope not in (Scope.ORG.value, Scope.USER.value):
-        raise HTTPException(422, detail="notes exist at 'org' or 'user' scope in v1")
+    if scope not in (Scope.ORG.value, Scope.USER.value, Scope.TEAM.value):
+        raise HTTPException(422, detail="notes exist at 'org', 'team' (a unit) or 'user' scope")
 
 
 def _out(read: svc.NoteRead) -> NoteOut:

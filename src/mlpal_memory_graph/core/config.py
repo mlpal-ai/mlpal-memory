@@ -156,6 +156,9 @@ class Settings(BaseSettings):
     trust_join_window_days: int = 30
     # memory v10: nightly, deterministic curation of the workspace notes (stale threads closed,
     # current-state block rebuilt from the injected state topics); Decisions/Preferences untouched
+    # memory v12 §2b: nightly roll-up of learnings by unit policy (`lift: {tier, to: parent}`)
+    units_lift_enabled: bool = True
+    units_lift_interval_seconds: int = 86400
     notes_curation_enabled: bool = True
     notes_curation_interval_seconds: int = 86400
     notes_thread_ttl_days: int = 14

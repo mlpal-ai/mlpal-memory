@@ -37,7 +37,7 @@ async def test_reads_report_latency_and_metrics_expose_histograms(client):
 @pytest.mark.asyncio
 async def test_profile_returns_stable_facts_and_recent_activity(client):
     await _claim(client, "preference", "person/{me}/pref/infra", "format", "one plain mail", scope="user")
-    await _claim(client, "state", "infra/state/identity", "account", "024249678939")
+    await _claim(client, "state", "infra/state/identity", "account", "123456789012")
     await _claim(client, "learning", "infra/learning", "dedup", "Pass --context=mlpal-new-eks to kubectl; the default points at the old account.")
     r = await client.get("/api/v1/memory/profile", params={"hop": "infra"}, headers=H)
     assert r.status_code == 200, r.text

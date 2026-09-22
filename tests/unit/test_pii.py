@@ -14,7 +14,7 @@ def test_finds_email_phone_national_id_and_luhn_cards():
 
 def test_silent_on_estate_identifiers_and_ordinary_numbers():
     for text in (
-        "account 024249678939 region us-east-2 arn:aws:iam::024249678939:role/hop-eval-ec2",
+        "account 123456789012 region us-east-2 arn:aws:iam::123456789012:role/hop-eval-ec2",
         "vol-0c493e116e469dfa9 10 GiB since 2026-07-26; rv 29230739; ready 2/2",
         "run-rate $1,196/mo; MTD $398.08; 2026-09-15T21:28Z",
         "10.0.4.17/32 to the Grafana SG; fs-0ea24d541ffdb05dd",

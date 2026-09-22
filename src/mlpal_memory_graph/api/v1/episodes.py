@@ -63,7 +63,7 @@ async def ingest_episodes(
                 env.org_id = identity.org_id
         else:
             env.org_id = identity.org_id
-        authorize_write_scope(identity, env.scope, env.scope_id)
+        authorize_write_scope(identity, env.scope, env.scope_id, hop=request.headers.get("x-hop"))
         kwargs = env.to_episode_kwargs(capture_content=settings.content_capture_default)
         inserted = await insert_episode(session, kwargs)
         if not inserted:
