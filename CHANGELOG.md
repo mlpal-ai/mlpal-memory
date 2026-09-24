@@ -2,6 +2,13 @@
 
 Versions follow the public package (`mlpal-memory`); the managed service deploys the same code.
 
+## 0.2.1 — 2026-09-24
+
+- Request metrics are labelled by route template again on Starlette ≥ 1.4 / FastAPI ≥ 0.140, where
+  included routers stay nested and the matched route's path lacks its prefix (the 0.2.0 image built
+  against those versions reported every read as `/memory/search`-style paths without `/api/v1`).
+- The image and both CI pipelines install the `pdf` extra, so PDF uploads work as documented.
+
 ## 0.2.0 — 2026-09-22
 
 Measured against six open-source memory systems and hardened for production; the first release a

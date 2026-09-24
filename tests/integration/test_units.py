@@ -71,7 +71,8 @@ async def test_writing_goes_up_one_level_never_down_or_sideways(client, tree):
     assert (await _doc(client, person("dan"), tree["platform"], "side", "dan is in sales")).status_code == 403
     listing = (await client.get("/api/v1/units", headers=person("alice"))).json()
     assert listing["mine"] == [tree["squad"], tree["platform"], tree["eng"]], "nearest first"
-    assert listing["administered"] == []
+    assert listing["administered"] == [] and listing["admin"] is False
+    assert (await client.get("/api/v1/units", headers=ADMIN)).json()["admin"] is True, "a memory admin governs every unit"
 
 
 async def test_administration_is_by_role_and_the_tree_refuses_cycles_and_accidental_deletes(client, tree):

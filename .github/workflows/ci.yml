@@ -24,7 +24,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
       - run: uv python install 3.12
-      - run: uv sync --extra pg --extra mcp --extra local-embeddings
+      - run: uv sync --extra pg --extra mcp --extra local-embeddings --extra pdf
       - name: Lint
         run: uv run ruff check --select F,E9,B src/ tests/
       - name: Offline suite (SQLite)

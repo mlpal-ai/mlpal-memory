@@ -25,7 +25,7 @@ COPY pyproject.toml README.md ./
 # the api, mcp (fastmcp/mlpal-mcp) for the sidecar. mlpal-* resolve from the private mlpal-pypi
 # index (see [[tool.uv.index]] + [tool.uv.sources]); it's reachable at build like the sibling
 # services (storage/skills). Quote the extras so the shell doesn't glob the brackets.
-RUN uv pip install --system --no-cache -e ".[mcp,pg,local-embeddings]"
+RUN uv pip install --system --no-cache -e ".[mcp,pg,local-embeddings,pdf]"
 
 # Runtime stage
 FROM python:3.12-slim AS runtime

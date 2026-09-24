@@ -96,6 +96,7 @@ class MemoryUpdateWorker(PollWorker):
         self._last_trust_join = float("-inf")
         self._last_notes_curation = float("-inf")
         self._last_units_lift = float("-inf")
+        self._last_connectors_sync = float("-inf")
 
     async def tick(self) -> None:
         factory = get_session_factory()
@@ -122,6 +123,7 @@ class MemoryUpdateWorker(PollWorker):
                 await self._maybe_trust_join(s0)  # v7: nightly consequence join, single-writer
                 await self._maybe_curate_notes(s0)  # memory v10: nightly note curation, deterministic
                 await self._maybe_lift_units(s0)  # memory v12: nightly roll-up by unit policy
+                await self._maybe_sync_connectors(s0)  # memory v12: connector sources on their interval
             finally:
                 # If the unlock itself fails, the pooled connection would silently keep
                 # the session-level lock and every future tick would no-op. Invalidate
@@ -327,3 +329,40 @@ class MemoryUpdateWorker(PollWorker):
             except Exception as exc:  # noqa: BLE001 — one tenant's failure must not stop the others
                 await session.rollback()
                 log.error("units.lift_failed", org=org, error=str(exc))
+
+    async def _maybe_sync_connectors(self, session) -> None:
+        """memory v12 §6: every connector source whose interval has passed is re-synced; one source's
+        failure is stored on the source (`last_error`) and never stops the others."""
+        import time
+        from datetime import UTC, datetime, timedelta
+
+        if not self.settings.connectors_sync_enabled:
+            return
+        if time.monotonic() - self._last_connectors_sync < self.settings.connectors_sync_interval_seconds:
+            return
+        self._last_connectors_sync = time.monotonic()
+        from sqlalchemy import select
+
+        from ..db.models import MemorySource
+        from .connectors.github import ConnectorError, GitHubConfig, sync_source
+
+        now = datetime.now(UTC)
+        rows = (await session.execute(select(MemorySource).where(MemorySource.kind == "github"))).scalars().all()
+        for src in rows:
+            cfg = GitHubConfig.from_source(src)
+            last = src.indexed_at if src.indexed_at is None or src.indexed_at.tzinfo else src.indexed_at.replace(tzinfo=UTC)
+            if last is not None and now - last < timedelta(minutes=cfg.interval_minutes):
+                continue
+            try:
+                res = await sync_source(session, src, user_id=None)
+                await session.commit()
+                log.info("connectors.synced", org=src.org_id, source=src.name, catalogued=res.catalogued, changed=res.changed, admitted=res.admitted)
+            except (ConnectorError, ModelUnavailable) as exc:
+                await session.rollback()
+                src.config = {**(src.config or {}), "last_error": str(exc)[:300]}
+                src.indexed_at = now  # not retried before the next interval
+                await session.commit()
+                log.error("connectors.sync_failed", org=src.org_id, source=src.name, error=str(exc))
+            except Exception as exc:  # noqa: BLE001 — one source's failure must not stop the others
+                await session.rollback()
+                log.error("connectors.sync_failed", org=src.org_id, source=src.name, error=str(exc))

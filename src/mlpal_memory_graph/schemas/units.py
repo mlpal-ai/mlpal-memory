@@ -36,6 +36,7 @@ class UnitListOut(BaseModel):
     units: list[UnitOut]
     mine: list[str]  # units the caller reads (nearest first)
     administered: list[str]
+    admin: bool = False  # a memory admin of the tenant: may create top-level units and govern every unit
 
 
 class MemberIn(BaseModel):

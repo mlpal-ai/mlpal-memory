@@ -84,6 +84,32 @@ async def register_files(session, *, org_id: str | None, user_id: str | None, na
     return src
 
 
+async def register_github(session, *, org_id: str | None, user_id: str | None, name: str, repo: str, branch: str | None,
+                          paths: list[str], credential_ref: str | None, admit_mode: str, interval_minutes: int,
+                          scope: str = "org", scope_id: str | None = None, workspace: str | None = None) -> MemorySource:
+    """memory v12 §6: a repository as a source. Registration stores the reference (never the token)
+    and runs the first sync; the worker re-syncs every `interval_minutes`."""
+    from .connectors.github import ConnectorError, sync_source
+
+    src = await get_source(session, org_id, name)
+    config = {"repo": repo.strip().strip("/"), "branch": branch or None, "paths": [p for p in paths if p], "credential_ref": credential_ref or None,
+              "admit": admit_mode, "interval_minutes": interval_minutes}
+    if src is None:
+        src = MemorySource(org_id=org_id, name=name, kind="github", scope=scope, scope_id=scope_id, workspace=workspace,
+                           config=config, status="cold", created_by=user_id)
+        session.add(src)
+        await session.flush()
+    elif src.kind != "github":
+        raise SourceError(f"source {name!r} exists with kind {src.kind}")
+    else:
+        src.config = {**(src.config or {}), **config}
+    try:
+        await sync_source(session, src, user_id=user_id)
+    except ConnectorError as exc:
+        raise SourceError(str(exc)) from exc
+    return src
+
+
 def _read_item(root: Path, ref: str) -> str:
     p = (root / ref).resolve()
     if not p.is_relative_to(root):
@@ -112,18 +138,26 @@ async def candidates(session, src: MemorySource, query: str, limit: int) -> list
     return [s[2] for s in scored[:limit]]
 
 
-async def admit(session, src: MemorySource, item: SourceItem, *, user_id: str | None, by: str) -> dict:
-    """Turn one cold item into a document through the governed fold (salience and budget apply)."""
+async def admit(session, src: MemorySource, item: SourceItem, *, user_id: str | None, by: str,
+                text: str | None = None, event_id: str | None = None) -> dict:
+    """Turn one cold item into a document through the governed fold (salience and budget apply).
+    A files item is read from disk; a connector item is fetched through its connector, or handed in
+    by the sync that already has it (with a version-specific event id)."""
     from ..api.deps import get_updater
     from ..db.models import Episode
 
-    root = Path(src.config["root"])
-    text = _read_item(root, item.ref)
+    if text is None:
+        if src.kind == "github":
+            from .connectors.github import read_item
+
+            text = await read_item(src, item)
+        else:
+            text = _read_item(Path(src.config["root"]), item.ref)
     if len(text.strip()) < 50:
         item.declined_reason = "empty"
         return {"ref": item.ref, "status": "declined", "reason": "empty"}
     # ids stay under the episodes table's 64-char event_id (Postgres enforces it; SQLite does not)
-    event_id = f"src:{src.id[:12]}:{hashlib.sha256(item.ref.encode()).hexdigest()[:24]}"
+    event_id = event_id or f"src:{src.id[:12]}:{hashlib.sha256(item.ref.encode()).hexdigest()[:24]}"
     env = EpisodeEnvelope(event_id=event_id, org_id=src.org_id, scope=src.scope, scope_id=src.scope_id, workspace=src.workspace,
                           source=f"src:{src.name}"[:32], action_type="document.ingested", content=text,
                           payload={"title": item.title or item.ref, "uri": f"{src.name}://{item.ref}", "promoted_by": by},

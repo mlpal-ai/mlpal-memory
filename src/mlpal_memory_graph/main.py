@@ -104,6 +104,23 @@ async def lifespan(app: FastAPI):
             await worker.stop()
 
 
+def _route_template(request: Request) -> str:
+    """The matched route's template (`/api/v1/memory/nodes/{node_id}`), never the raw path (ids
+    would explode cardinality). Newer Starlette/FastAPI keep included routers nested, so the
+    matched route's own path lacks the `/api/v1` prefix; the template is the raw path with the
+    route's trailing segments (which carry the `{param}` names) substituted in."""
+    route = request.scope.get("route")
+    route_path = getattr(route, "path", None)
+    if not route_path:
+        return "unrouted"
+    raw = request.scope.get("path") or request.url.path
+    rs = [seg for seg in route_path.split("/") if seg]
+    ps = [seg for seg in raw.split("/") if seg]
+    if rs and len(ps) >= len(rs):
+        return "/" + "/".join(ps[: len(ps) - len(rs)] + rs)
+    return route_path
+
+
 def create_app() -> FastAPI:
     settings = get_settings()
     setup_logging(settings.log_level)
@@ -157,8 +174,7 @@ def create_app() -> FastAPI:
         t0 = _t.monotonic()
         response = await call_next(request)
         ms = (_t.monotonic() - t0) * 1000
-        route = getattr(request.scope.get("route"), "path", None) or "unrouted"
-        REGISTRY.observe(route=route, method=request.method, status=response.status_code, ms=ms)
+        REGISTRY.observe(route=_route_template(request), method=request.method, status=response.status_code, ms=ms)
         response.headers["X-Took-Ms"] = str(int(ms))
         return response
 

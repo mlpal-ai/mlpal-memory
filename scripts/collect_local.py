@@ -17,6 +17,7 @@ governed fold (consent → policy → redaction) server-side.
 from __future__ import annotations
 
 import argparse
+import os
 import getpass
 import sys
 import time
@@ -39,17 +40,16 @@ DEFAULT_CODE_ROOT = Path.home() / "Downloads" / "Coding" / "mlpal" / "code"
 
 
 class Ingestor:
-    def __init__(self, base: str, org: str, user: str, dry_run: bool) -> None:
+    def __init__(self, base: str, org: str, user: str, dry_run: bool, api_key: str | None = None) -> None:
         self.dry = dry_run
-        self.client = httpx.Client(
-            base_url=base,
-            timeout=120,
-            headers={
-                "X-Test-Org-Id": org,
-                "X-Test-User-Id": user,
-                "Content-Type": "application/json",
-            },
-        )
+        # memory v12 §6, the first door: the same collectors push to a managed or self-hosted
+        # instance with a key (X-API-Key); without one they use the local dev identity headers
+        headers = {"Content-Type": "application/json"}
+        if api_key:
+            headers["X-API-Key"] = api_key
+        else:
+            headers.update({"X-Test-Org-Id": org, "X-Test-User-Id": user})
+        self.client = httpx.Client(base_url=base, timeout=120, headers=headers)
         self.user = user
         self.stats = {"documents": 0, "duplicates": 0, "episodes": 0, "dropped": 0, "errors": 0}
         # URIs the server treated as NEW this run — the C1 replay canary asserts this is
@@ -247,7 +247,10 @@ def main() -> int:
         "--source", choices=["all", "claude-code", "md", "repos", "pdfs"], default="all"
     )
     ap.add_argument("--pdf-root", type=Path, default=None, help="root dir for --source pdfs")
-    ap.add_argument("--base-url", default="http://localhost:8000")
+    ap.add_argument("--base-url", default=os.environ.get("MLPAL_MEMORY_URL", "http://localhost:8000"),
+                    help="the memory service (env MLPAL_MEMORY_URL)")
+    ap.add_argument("--api-key", default=os.environ.get("MLPAL_MEMORY_API_KEY"),
+                    help="a key with memory.write for a managed or self-hosted instance (env MLPAL_MEMORY_API_KEY); without it the dev headers are used")
     ap.add_argument("--org", default="local")
     ap.add_argument("--user", default=getpass.getuser())
     ap.add_argument("--code-root", type=Path, default=DEFAULT_CODE_ROOT)
@@ -263,7 +266,7 @@ def main() -> int:
 
     # NOTE (repo scope): the collector's repo docs/cards land in REPO subject scope,
     # which requires elevated write authz — the local single-user org uses admin perms.
-    ing = Ingestor(args.base_url, args.org, args.user, args.dry_run)
+    ing = Ingestor(args.base_url, args.org, args.user, args.dry_run, api_key=args.api_key)
     ing.client.headers["X-Test-Permissions"] = "memory:read,memory:write,memory:admin"
 
     t0 = time.monotonic()

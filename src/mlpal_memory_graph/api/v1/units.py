@@ -54,7 +54,8 @@ async def _out(session: AsyncSession, by_id: dict[str, Unit]) -> list[UnitOut]:
 async def list_units(session: _SESSION, identity: _READ) -> UnitListOut:
     org = _tenant(identity)
     by_id = await svc.load_tree(session, org)
-    return UnitListOut(units=await _out(session, by_id), mine=list(identity.team_ids), administered=list(identity.administered_units))
+    return UnitListOut(units=await _out(session, by_id), mine=list(identity.team_ids), administered=list(identity.administered_units),
+                       admin=bool(identity.is_service or identity.is_admin()))
 
 
 @router.post("", response_model=UnitOut, status_code=201)

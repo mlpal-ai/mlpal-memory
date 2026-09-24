@@ -37,6 +37,10 @@ class Settings(BaseSettings):
     auth_service_url: str = ""
     internal_service_api_key: str = "dev-internal-key"
     dev_auth: bool = True
+    # memory v12 §3: a session token names a person, not an organization. When set (managed:
+    # https://mlpal.ai/api/v1), a person may choose a tenant with X-Org-Id and the platform's own
+    # membership list (GET <url>/organizations with the same bearer) decides whether it is theirs.
+    org_membership_url: str = ""
     # A self-hosted instance authenticates against this key file (core/api_keys.py) instead of
     # the platform auth service. Empty -> the mlpal_auth SDK is required outside local envs.
     api_keys_file: str = ""
@@ -156,6 +160,9 @@ class Settings(BaseSettings):
     trust_join_window_days: int = 30
     # memory v10: nightly, deterministic curation of the workspace notes (stale threads closed,
     # current-state block rebuilt from the injected state topics); Decisions/Preferences untouched
+    # memory v12 §6: connector sources (GitHub) re-sync on their own interval; the worker checks this often
+    connectors_sync_enabled: bool = True
+    connectors_sync_interval_seconds: int = 300
     # memory v12 §2b: nightly roll-up of learnings by unit policy (`lift: {tier, to: parent}`)
     units_lift_enabled: bool = True
     units_lift_interval_seconds: int = 86400

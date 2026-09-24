@@ -28,9 +28,11 @@ router = APIRouter(prefix="/sources", tags=["sources"])
 
 
 def _out(s: MemorySource, schema: dict | None = None) -> SourceOut:
+    c = s.config or {}
     return SourceOut(name=s.name, kind=s.kind, status=s.status, item_count=s.item_count, scope=s.scope, scope_id=s.scope_id,
-                     workspace=s.workspace, tables=list((s.config or {}).get("tables") or []), schema_tables=schema,
-                     indexed_at=s.indexed_at.isoformat() if s.indexed_at else None)
+                     workspace=s.workspace, tables=list(c.get("tables") or []), schema_tables=schema,
+                     indexed_at=s.indexed_at.isoformat() if s.indexed_at else None,
+                     repo=c.get("repo"), branch=c.get("branch"), admit=c.get("admit"), last_sync=c.get("last_sync"), last_error=c.get("last_error"))
 
 
 @router.post("", response_model=SourceOut, status_code=201)
@@ -47,6 +49,13 @@ async def register_source(
                 raise svc.SourceError("a files source needs `root`")
             src = await svc.register_files(session, org_id=identity.org_id, user_id=identity.user_id, name=body.name, root=body.root,
                                            scope=body.scope, scope_id=scope_id, workspace=body.workspace)
+            schema = None
+        elif body.kind == "github":
+            if not body.repo:
+                raise svc.SourceError("a GitHub source needs `repo` as owner/name")
+            src = await svc.register_github(session, org_id=identity.org_id, user_id=identity.user_id, name=body.name, repo=body.repo,
+                                            branch=body.branch, paths=body.paths, credential_ref=body.credential_ref, admit_mode=body.admit,
+                                            interval_minutes=body.interval_minutes, scope=body.scope, scope_id=scope_id, workspace=body.workspace)
             schema = None
         else:
             if not body.url:

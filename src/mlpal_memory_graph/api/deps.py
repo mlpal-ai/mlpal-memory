@@ -112,9 +112,16 @@ async def get_identity(
         raise
     except Exception:  # noqa: BLE001
         raise HTTPException(status_code=401, detail="invalid credentials") from None
+    org_id = _as_str(getattr(result, "org_id", None))
+    chosen = request.headers.get("x-org-id")
+    if chosen and chosen != org_id:
+        # a person in an organization: the token names them, the header names the tenant, the
+        # platform's membership list says whether that pairing is theirs
+        await require_membership(token, chosen, s.org_membership_url)
+        org_id = chosen
     return await _with_units(_identity(
         _as_str(getattr(result, "user_id", None)),
-        _as_str(getattr(result, "org_id", None)),
+        org_id,
         list(getattr(result, "permissions", []) or []),
         _as_str(getattr(result, "key_id", None)),
     ))
@@ -142,6 +149,41 @@ def _identity(
         writable_team_ids=team_ids_from_permissions(perms),
         is_service=is_service,
     )
+
+
+MEMBERSHIP_TTL_S = 60.0
+_membership_cache: dict[tuple[str, str], float] = {}  # (token digest, org) -> expiry
+_membership_transport = None  # tests inject an httpx transport here
+
+
+async def require_membership(token: str, org_id: str, base_url: str) -> None:
+    """403 unless the platform lists `org_id` among the organizations this token's person belongs
+    to. The platform is asked with the person's own bearer, so memory never holds a service
+    credential for it; a positive answer is cached briefly per token."""
+    import hashlib
+    import time
+
+    import httpx
+
+    if not base_url:
+        raise HTTPException(status_code=403, detail="choosing an organization is not enabled on this instance")
+    key = (hashlib.sha256(token.encode()).hexdigest(), org_id)
+    now = time.monotonic()
+    if _membership_cache.get(key, 0.0) > now:
+        return
+    try:
+        async with httpx.AsyncClient(base_url=base_url, timeout=10, transport=_membership_transport) as client:
+            r = await client.get("/organizations", headers={"Authorization": f"Bearer {token}"})
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=503, detail="organization membership could not be checked") from exc
+    if r.status_code != 200:
+        raise HTTPException(status_code=403, detail="organization membership could not be confirmed")
+    body = r.json()
+    orgs = body.get("organizations", body) if isinstance(body, dict) else body
+    ids = {str(o.get("id")) for o in orgs if isinstance(o, dict)}
+    if org_id not in ids:
+        raise HTTPException(status_code=403, detail="not a member of that organization")
+    _membership_cache[key] = now + MEMBERSHIP_TTL_S
 
 
 async def _with_units(identity: AuthIdentity) -> AuthIdentity:
