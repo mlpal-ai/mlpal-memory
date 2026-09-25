@@ -38,8 +38,18 @@ def test_learning_claim_is_a_fact_the_actor_decided_with_confidence_by_grounding
     assert ungrounded.edges[0].props["confidence"] == 0.4 and ungrounded.edges[0].props["grounded"] is False
 
 
-def test_record_and_deviation_claims_extract_nothing_and_junk_is_ignored():
-    assert extract_claim(_ep("record")).entities == []
+def test_record_claim_is_a_keyed_entry_under_its_own_anchor():
+    """A record is dated and append-only: it reads back by search and by topic + key, and two records
+    on different keys never supersede each other (found by the keyring E2E: writes were accepted
+    and vanished from every read path)."""
+    r = extract_claim(_ep("record", topic="e2e/keyring-memory-leg", key="2026-09-25", value="keyring memory-leg E2E ran on 2026-09-25"))
+    anchors = [e for e in r.entities if e.type == "Metric"]
+    assert anchors and anchors[0].key == "record:e2e/keyring-memory-leg:2026-09-25"
+    assert any(e.type == "MetricValue" and e.props["unit"] == "record" for e in r.entities)
+    assert not anchors[0].key.startswith("state:"), "records stay out of the current-state block"
+
+
+def test_deviation_claims_extract_nothing_and_junk_is_ignored():
     assert extract_claim(_ep("deviation", topic="infra/deviation", key="r1", value="kind: refusal\nexpected: x")).entities == []
     assert extract_claim(_ep("state", value="")).entities == []                       # no value, no fact
     assert extract_claim(_ep("state", key="")).entities == []                         # no key, no fact

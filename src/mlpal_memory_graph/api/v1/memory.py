@@ -257,6 +257,7 @@ _KIND_FILTERS: dict[str, tuple[str, str | None]] = {
     "state": ("Metric", "state:"),
     "preference": ("Metric", "pref:"),
     "pref": ("Metric", "pref:"),
+    "record": ("Metric", "record:"),
     "learning": ("Fact", None),
 }
 

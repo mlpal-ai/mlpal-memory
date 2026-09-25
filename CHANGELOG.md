@@ -2,6 +2,12 @@
 
 Versions follow the public package (`mlpal-memory`); the managed service deploys the same code.
 
+## 0.2.2 — 2026-09-25
+
+- A `record` claim (dated, append-only) now folds into its own keyed anchor and reads back through
+  search and `type=record`; before, the write was accepted and reached no read path (found by the
+  keyring end-to-end test). Records never supersede each other and stay out of the current-state block.
+
 ## 0.2.1 — 2026-09-24
 
 - Request metrics are labelled by route template again on Starlette ≥ 1.4 / FastAPI ≥ 0.140, where

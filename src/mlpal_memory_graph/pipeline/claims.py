@@ -41,8 +41,10 @@ def _text(value: Any) -> str:
 
 
 def anchor_key(kind: str, topic: str, key: str) -> str:
-    """The stable anchor a keyed claim supersedes under: ``state:<topic>:<key>`` / ``pref:<topic>:<key>``."""
-    prefix = "pref" if kind == "preference" else "state"
+    """The stable anchor a keyed claim supersedes under: ``state:<topic>:<key>`` / ``pref:<topic>:<key>``
+    / ``record:<topic>:<key>``. A record is a dated, append-only entry: each key is its own anchor, so
+    records never supersede each other and stay out of the current-state block."""
+    prefix = {"preference": "pref", "record": "record"}.get(kind, "state")
     return f"{prefix}:{topic}:{key}"
 
 
@@ -102,7 +104,7 @@ def extract_claim(episode) -> Extraction:
     # hop-v1.1 §9.3: topic ids may carry `{me}`; the service knows the actor, so it resolves the
     # placeholder here rather than trusting the writer (engine or model) to have substituted it
     topic = topic.replace("{me}", str(actor))
-    if kind in ("state", "preference"):
+    if kind in ("state", "preference", "record"):
         key = str(p.get("key") or "")
         value = _text(p.get("value"))[:_MAX_VALUE]
         if not key or not value:

@@ -218,3 +218,20 @@ async def test_pdf_upload_extracts_text(client):
     assert r.status_code == 202, r.text
     titles = await _titles(client, ADMIN, "budget freeze November")
     assert "budget.pdf" in titles
+
+
+async def test_a_record_claim_reads_back_by_search_and_by_kind(client):
+    """The keyring E2E case: memory_write kind=record must be readable through memory_search."""
+    H2 = {"X-Test-Org-Id": "e2e", "X-Test-User-Id": "svp", "X-Test-Permissions": "memory.read,memory.write"}
+    env = {"scope": "org", "source": "harness_memory", "action_type": "memory.claim", "actor": {"user_id": "svp"},
+           "payload": {"topic": "e2e/keyring-memory-leg", "kind": "record", "key": "2026-09-25",
+                       "value": "keyring memory-leg E2E ran on 2026-09-25", "evidence_ids": ["user-request-2026-09-25"]}}
+    r = await client.post("/api/v1/episodes", params={"process": "true"}, json={"episodes": [env]}, headers=H2)
+    assert r.status_code == 202 and r.json()["processed"] == 1, r.text
+    r = await client.get("/api/v1/memory/search", params={"q": "keyring memory-leg E2E ran", "limit": 10}, headers=H2)
+    names = [n["name"] for n in r.json()["nodes"]]
+    assert any("keyring memory-leg E2E ran on 2026-09-25" in n for n in names), names
+    r = await client.get("/api/v1/memory/search", params={"q": "keyring", "type": "record"}, headers=H2)
+    assert r.json()["nodes"] and all(n["type"] == "Metric" for n in r.json()["nodes"])
+    r = await client.get("/api/v1/memory/search", params={"q": "keyring", "type": "state"}, headers=H2)
+    assert r.json()["nodes"] == [], "a record is not state"
