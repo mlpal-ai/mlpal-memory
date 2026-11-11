@@ -20,19 +20,28 @@ from .db.models import Base
 log = get_logger(__name__)
 
 
-def _run_alembic_upgrade() -> None:
-    """Best-effort `alembic upgrade head` (locate alembic.ini up the tree)."""
+def _alembic_config():
+    """The alembic Config the server migrates with (alembic.ini located up the tree, the URL from
+    settings), or None when no ini is packaged."""
     from alembic.config import Config
-
-    from alembic import command
 
     for parent in Path(__file__).resolve().parents:
         ini = parent / "alembic.ini"
         if ini.exists():
             cfg = Config(str(ini))
             cfg.set_main_option("sqlalchemy.url", get_settings().database_url_sync)
-            command.upgrade(cfg, "head")
-            return
+            return cfg
+    return None
+
+
+def _run_alembic_upgrade() -> None:
+    """Best-effort `alembic upgrade head` in-process. env.py configures logging on the way and must
+    not disable the server's loggers (tests/unit/test_startup_logging.py)."""
+    from alembic import command
+
+    cfg = _alembic_config()
+    if cfg is not None:
+        command.upgrade(cfg, "head")
 
 
 async def _init_db() -> None:

@@ -16,7 +16,10 @@ from mlpal_memory_graph.db.models import Base  # noqa: E402
 
 config = context.config
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # the server runs `alembic upgrade head` in-process at startup; fileConfig's default
+    # disable_existing_loggers=True would silence uvicorn's error and access loggers (and every other
+    # logger made before this point), so unhandled exceptions left no trace
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 settings = get_settings()
 SCHEMA = settings.db_schema or None
