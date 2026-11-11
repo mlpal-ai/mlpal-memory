@@ -2,6 +2,15 @@
 
 Versions follow the public package (`mlpal-memory`); the managed service deploys the same code.
 
+## Unreleased
+
+- **The startup migration no longer silences the server's loggers.** The in-process `alembic upgrade
+  head` ran env.py's `fileConfig(alembic.ini)` with its default `disable_existing_loggers=True`, which
+  disabled every logger made before it, uvicorn's error and access loggers included, so an unhandled
+  exception outside the app's own handler left no line. env.py now passes
+  `disable_existing_loggers=False`; a unit test drives env.py through the server's own alembic config
+  against a scratch database and asserts the loggers stay enabled.
+
 ## 0.2.2 — 2026-09-25
 
 - A `record` claim (dated, append-only) now folds into its own keyed anchor and reads back through
